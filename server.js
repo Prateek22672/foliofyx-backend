@@ -55,6 +55,17 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
+/* ============================
+   ✅ WAKE-UP ROUTE (Keep Alive)
+============================ */
+// This is the route your Cron Job will hit every 14 minutes
+app.get("/api/ping", (req, res) => {
+  res.status(200).send("Pong! Server is awake.");
+});
+
+/* ============================
+   APP ROUTES
+============================ */
 app.use("/api/auth", authRoutes);
 app.use("/api/portfolio", portfolioRoutes);
 app.use("/api/payment", paymentRoutes);
