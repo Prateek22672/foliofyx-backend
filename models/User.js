@@ -2,34 +2,38 @@ import mongoose from "mongoose";
 
 const userSchema = new mongoose.Schema(
   {
-    name: { type: String, required: true, trim: true },
-    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
-    password: { type: String, default: "" },
+    name: { type: String, required: true },
+    email: { type: String, required: true, unique: true },
+    
+    // ✅ FIX: Remove 'required: true' to support Google/OAuth users
+    password: { type: String, default: "" }, 
+    
+    // Verification Flag
+    isStudent: { type: Boolean, default: false },
 
-    // ✅ NEW: SUBSCRIPTION FIELDS
+    // Plan Field
     plan: { 
       type: String, 
-      enum: ['free', 'plus', 'max'], 
+      enum: ['free', 'max'], 
       default: 'free' 
     },
+
+    // Subscription Object
     subscription: {
       startDate: { type: Date },
-      endDate: { type: Date }, // Critical for expiration
+      endDate: { type: Date },
       isActive: { type: Boolean, default: false },
-      paymentId: { type: String }, // To store PhonePe Transaction ID later
-      provider: { type: String, default: 'manual' } // 'phonepe', 'manual', etc.
+      paymentId: { type: String },
+      provider: { type: String }
     },
   },
   { timestamps: true }
 );
 
-// ✅ METHOD: Check Expiration
-// Call this whenever you fetch the user to ensure status is real-time
+// Helper Method
 userSchema.methods.checkSubscriptionStatus = function() {
-  // Only check if they are NOT free and have an end date
-  if (this.plan !== 'free' && this.subscription.endDate) {
+  if (this.plan !== 'free' && this.subscription && this.subscription.endDate) {
     const today = new Date();
-    // If today is past the end date
     if (today > this.subscription.endDate) {
       this.plan = 'free';
       this.subscription.isActive = false;

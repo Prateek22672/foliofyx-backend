@@ -47,18 +47,17 @@ app.use(
 app.options("*", cors());
 
 /* ============================
-   OTHER MIDDLEWARES
+   ✅ MIDDLEWARES (PAYLOAD LIMIT FIX)
 ============================ */
-
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
+// This line fixes the "413 Payload Too Large" error
+app.use(express.json({ limit: "10mb" })); 
+app.use(express.urlencoded({ limit: "10mb", extended: true }));
 
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
 /* ============================
-   ✅ WAKE-UP ROUTE (Keep Alive)
+   ✅ WAKE-UP ROUTE
 ============================ */
-// This is the route your Cron Job will hit every 14 minutes
 app.get("/api/ping", (req, res) => {
   res.status(200).send("Pong! Server is awake.");
 });
