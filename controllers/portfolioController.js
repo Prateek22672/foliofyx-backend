@@ -92,6 +92,7 @@ export const savePortfolio = async (req, res) => {
       
       themeBg: data.themeBg || existingPortfolio?.themeBg || "#000000",
       themeFont: data.themeFont || existingPortfolio?.themeFont || "#FFFFFF",
+      themeFontFamily: data.themeFontFamily || existingPortfolio?.themeFontFamily || "Switzer, sans-serif", // <--- ADD THIS
       accentColor: data.accentColor || existingPortfolio?.accentColor || "#A855F7",
       headerColor: data.headerColor || existingPortfolio?.headerColor || "#000000",
 

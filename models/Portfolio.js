@@ -28,13 +28,7 @@ const PortfolioSchema = new mongoose.Schema(
       required: true 
     },
     
-    username: { 
-      type: String, 
-      unique: true, 
-      sparse: true, 
-      trim: true, 
-      lowercase: true 
-    },
+    username: { type: String, unique: true, sparse: true, trim: true, lowercase: true },
 
     name: { type: String, required: true },
     template: { type: String, default: "modern" },
@@ -42,7 +36,7 @@ const PortfolioSchema = new mongoose.Schema(
     bio: { type: String, default: "" },
     image: { type: String, default: "" },
 
-    // ✅ ADDED: AI Chatbot Status
+    // AI Status
     enableChatbot: { type: Boolean, default: false },
 
     experience: [ExperienceSchema],
@@ -54,8 +48,10 @@ const PortfolioSchema = new mongoose.Schema(
     email: { type: String, default: "" },
     cvLink: { type: String, default: "" },
 
+    // ✅ THEME SETTINGS (Added Font Family)
     themeBg: { type: String, default: "#ffffff" },
     themeFont: { type: String, default: "#000000" },
+    themeFontFamily: { type: String, default: "Switzer, sans-serif" }, // <--- NEW FIELD
     accentColor: { type: String, default: "#000000" },
     
     isPublic: { type: Boolean, default: false }
