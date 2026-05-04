@@ -17,7 +17,7 @@ connectDB();
 const app = express();
 
 /* ============================
-   ✅ CORS CONFIG (FIXED)
+   ✅ CORS CONFIG (FINAL STABLE)
 ============================ */
 const allowedOrigins = [
   "http://localhost:5173",
@@ -27,15 +27,28 @@ const allowedOrigins = [
   "https://www.foliofyx.in",
 ];
 
-app.use(
-  cors({
-    origin: allowedOrigins,
-    credentials: true,
-  })
-);
+const corsOptions = {
+  origin: function (origin, callback) {
+    // Allow requests without origin (Postman, server-to-server)
+    if (!origin) return callback(null, true);
 
-// ✅ Handle preflight properly
-app.options("*", cors());
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+
+    // ❗ Do NOT throw error → just block silently
+    return callback(null, false);
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+
+// ✅ Apply once
+app.use(cors(corsOptions));
+
+// ✅ Handle preflight requests
+app.options("*", cors(corsOptions));
 
 /* ============================
    ✅ MIDDLEWARES
@@ -48,6 +61,8 @@ app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 /* ============================
    ✅ ROUTES
 ============================ */
+
+// Health check
 app.get("/api/ping", (req, res) => {
   res.status(200).send("Pong! Server is awake.");
 });
@@ -56,7 +71,7 @@ app.use("/api/auth", authRoutes);
 app.use("/api/portfolio", portfolioRoutes);
 app.use("/api/payment", paymentRoutes);
 
-// ⚠️ Keep this LAST if unsure (debug safety)
+// ⚠️ IMPORTANT: keep this LAST
 app.use("/api", resumeParserRoute);
 
 app.get("/", (req, res) => {
@@ -64,10 +79,15 @@ app.get("/", (req, res) => {
 });
 
 /* ============================
-   ✅ ERROR HANDLER (IMPORTANT)
+   ✅ ERROR HANDLER (CORS SAFE)
 ============================ */
 app.use((err, req, res, next) => {
   console.error("🔥 Server Error:", err.message);
+
+  // Ensure CORS headers even on error
+  res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
+  res.header("Access-Control-Allow-Credentials", "true");
+
   res.status(500).json({ message: "Internal Server Error" });
 });
 
@@ -75,4 +95,6 @@ app.use((err, req, res, next) => {
    ✅ START SERVER
 ============================ */
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`🚀 Backend running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`🚀 Backend running on port ${PORT}`);
+});
