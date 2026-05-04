@@ -17,7 +17,7 @@ const ProjectSchema = new mongoose.Schema({
   tech: { type: String, default: "" },
   github: { type: String, default: "" },
   demo: { type: String, default: "" },
-  description: { type: String, default: "" }
+  description: { type: String, default: "" } 
 }, { _id: false });
 
 const PortfolioSchema = new mongoose.Schema(
@@ -34,6 +34,20 @@ const PortfolioSchema = new mongoose.Schema(
     template: { type: String, default: "modern" },
     role: { type: String, default: "" },
     bio: { type: String, default: "" },
+    
+    education: { type: String, default: "" }, 
+    
+    // ✅ ADDED LOCATION FIELD
+    // This allows you to store specific location data separately from extraText
+    location: { type: String, default: "India" }, 
+    caption: { type: String, default: "" },
+    
+    currentFocus: { type: String, default: "" }, 
+
+    // ✅ KEEPING EXTRATEXT
+    // Your Pulse About page is currently saving "Location" here
+    extraText: { type: String, default: "" }, 
+    
     image: { type: String, default: "" },
 
     // AI Status
@@ -48,10 +62,10 @@ const PortfolioSchema = new mongoose.Schema(
     email: { type: String, default: "" },
     cvLink: { type: String, default: "" },
 
-    // ✅ THEME SETTINGS (Added Font Family)
+    // THEME SETTINGS
     themeBg: { type: String, default: "#ffffff" },
     themeFont: { type: String, default: "#000000" },
-    themeFontFamily: { type: String, default: "Switzer, sans-serif" }, // <--- NEW FIELD
+    themeFontFamily: { type: String, default: "Switzer, sans-serif" }, 
     accentColor: { type: String, default: "#000000" },
     
     isPublic: { type: Boolean, default: false }
