@@ -14,24 +14,48 @@ import path from "path";
 import fs from "fs";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
-import Groq from "groq-sdk";
+import { callGroqPool, poolAvailable } from "../lib/groqPool.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-// ── Lazy Groq client ──────────────────────────────────────────────────────────
-let _groq = null;
-function getGroq() {
-  if (!_groq) {
-    if (!process.env.GROQ_API_KEY) throw new Error("GROQ_API_KEY is not set in .env");
-    _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-  }
-  return _groq;
-}
+// Model chain: strongest first, fast model as a fallback when the 70B is
+// rate-limited/unavailable across every key in the pool.
+const GROQ_MODELS = [
+  { id: "llama-3.3-70b-versatile", label: "llama-3.3-70b", maxOut: 1000 },
+  { id: "llama-3.1-8b-instant",    label: "llama-3.1-8b",  maxOut: 1000 },
+];
 
-const GROQ_MODEL    = "llama-3.3-70b-versatile";
 const PYTHON_SCRIPT = path.join(__dirname, "../python/resume_extractor.py");
 const PYTHON_BIN    = process.platform === "win32" ? "python" : "python3";
+
+// Per-extractor input budget. The 70B has plenty of context; the old 4000-char
+// blind cut regularly dropped the bottom half of dense resumes.
+const INPUT_BUDGET = 7000;
+
+/**
+ * Condense raw resume text before sending it to the model: collapse repeated
+ * whitespace, drop duplicate lines (headers/footers repeat on every PDF page)
+ * and decorative rules, then cap at the budget. Beats a blind substring cut —
+ * the tail of the resume (projects, certifications) survives.
+ */
+function condense(text, budget = INPUT_BUDGET) {
+  if (!text) return "";
+  const seen = new Set();
+  const lines = [];
+  for (const rawLine of String(text).split(/\r?\n/)) {
+    const line = rawLine.replace(/\s+/g, " ").trim();
+    if (!line) continue;
+    if (/^[-_=*•.\s|]{4,}$/.test(line)) continue; // decorative separators
+    const key = line.toLowerCase();
+    if (line.length > 8 && seen.has(key)) continue; // repeated page headers/footers
+    seen.add(key);
+    lines.push(line);
+  }
+  let out = lines.join("\n");
+  if (out.length > budget) out = out.slice(0, budget);
+  return out;
+}
 
 // ── STEP 1: Python ────────────────────────────────────────────────────────────
 function runPython(filePath) {
@@ -78,22 +102,38 @@ function cleanStr(s) {
 }
 
 // ── STEP 3: Groq helper ───────────────────────────────────────────────────────
+// Extract the JSON object from a model reply, tolerating code fences and
+// stray prose around it. Returns null when nothing parseable is found.
+function extractJson(raw) {
+  if (!raw) return null;
+  let s = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
+  try { return JSON.parse(s); } catch { /* try the outermost {...} below */ }
+  const start = s.indexOf("{");
+  const end = s.lastIndexOf("}");
+  if (start === -1 || end <= start) return null;
+  try { return JSON.parse(s.slice(start, end + 1)); } catch { return null; }
+}
+
+// Runs through the shared multi-key pool: key rotation on 429/401 and model
+// fallback (70B → 8B), instead of the old dedicated single-key client.
 async function groqCall(systemPrompt, userContent, label) {
   try {
-    console.log(`[Groq:${label}] Sending ${userContent.length} chars...`);
-    const res = await getGroq().chat.completions.create({
-      model:           GROQ_MODEL,
-      temperature:     0,
-      max_tokens:      1000,
-      response_format: { type: "json_object" },
-      messages: [
+    const input = condense(userContent);
+    console.log(`[Groq:${label}] Sending ${input.length} chars (pool)...`);
+    const res = await callGroqPool(
+      [
         { role: "system", content: systemPrompt },
-        { role: "user",   content: userContent.substring(0, 4000) },
+        { role: "user",   content: input },
       ],
-    });
-    const raw = res.choices[0]?.message?.content?.trim() || "{}";
-    console.log(`[Groq:${label}] Response: ${raw.substring(0, 120)}...`);
-    return JSON.parse(raw);
+      1000,
+      GROQ_MODELS,
+      { temperature: 0, responseFormat: { type: "json_object" } }
+    );
+    const raw = (res.text || "").trim();
+    console.log(`[Groq:${label}] ${res.model}/${res.keyLabel}: ${raw.substring(0, 120)}...`);
+    const parsed = extractJson(raw);
+    if (!parsed) console.error(`[Groq:${label}] Unparseable JSON reply`);
+    return parsed;
   } catch (err) {
     console.error(`[Groq:${label}] FAILED — ${err.message}`);
     if (err?.error) console.error(`[Groq:${label}] Details:`, JSON.stringify(err.error));
@@ -257,13 +297,18 @@ STRICT RULES:
 
 // ── STEP 4E: Experience ───────────────────────────────────────────────────────
 async function extractExperience(rawExp, rawFull) {
-  const input = rawExp?.trim() || "";
+  // Section splitting is heading-based; resumes with unusual headings end up
+  // with an empty section. Fall back to scanning the whole (condensed) text
+  // instead of silently returning nothing.
+  const usingFullText = !rawExp?.trim();
+  const input = rawExp?.trim() || rawFull?.trim() || "";
   if (!input) {
-    console.log("[ResumeParser] No raw_experience — skipping experience extraction");
+    console.log("[ResumeParser] No raw_experience or raw_full — skipping experience extraction");
     return [];
   }
+  if (usingFullText) console.log("[ResumeParser] No raw_experience section — scanning full text");
 
-  const sys = `You are a resume parser. Extract work experience entries.
+  const sys = `You are a resume parser. Extract work experience entries.${usingFullText ? "\nThe input is the FULL resume text — find the work-experience entries within it. If there are none (student resume with no jobs), return { \"experience\": [] }." : ""}
 Return JSON: { "experience": [{ "company": "", "role": "", "period": "", "desc": "" }] }
 
 CRITICAL RULES:
@@ -299,13 +344,15 @@ CRITICAL RULES:
 
 // ── STEP 4F: Projects ─────────────────────────────────────────────────────────
 async function extractProjects(rawProjects, rawFull) {
-  const input = rawProjects?.trim() || "";
+  const usingFullText = !rawProjects?.trim();
+  const input = rawProjects?.trim() || rawFull?.trim() || "";
   if (!input) {
-    console.log("[ResumeParser] No raw_projects — skipping project extraction");
+    console.log("[ResumeParser] No raw_projects or raw_full — skipping project extraction");
     return [];
   }
+  if (usingFullText) console.log("[ResumeParser] No raw_projects section — scanning full text");
 
-  const sys = `You are a resume parser. Extract real software/coding projects.
+  const sys = `You are a resume parser. Extract real software/coding projects.${usingFullText ? "\nThe input is the FULL resume text — find the project entries within it. If there are none, return { \"projects\": [] }." : ""}
 Return JSON: { "projects": [{ "title": "", "tech": "", "github": "", "demo": "", "description": "" }] }
 
 STRICT RULES:

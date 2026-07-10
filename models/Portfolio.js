@@ -67,7 +67,13 @@ const PortfolioSchema = new mongoose.Schema(
     themeFont: { type: String, default: "#000000" },
     themeFontFamily: { type: String, default: "Switzer, sans-serif" }, 
     accentColor: { type: String, default: "#000000" },
-    
+
+    // CUSTOM BUILDER LAYOUT
+    // Free-form canvas document for the "custom" template (pages → elements).
+    // Mixed type so the whole builder document persists without a rigid schema.
+    // Without this field, Mongoose strict mode silently drops the canvas on save.
+    customLayout: { type: mongoose.Schema.Types.Mixed, default: null },
+
     isPublic: { type: Boolean, default: false }
   },
   { timestamps: true }

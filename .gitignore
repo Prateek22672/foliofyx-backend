@@ -1,2 +1,11 @@
 node_modules
 .env
+
+# Python
+__pycache__/
+*.pyc
+python/rag_model.json
+
+# Local scratch / user uploads
+conc/
+uploads/

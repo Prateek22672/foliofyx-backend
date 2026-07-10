@@ -3,9 +3,20 @@
 import express from "express";
 import multer from "multer";
 import os from "os";
+import rateLimit from "express-rate-limit";
 import { parseResume } from "../controllers/resumeParserController.js";
+import { protect } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
+
+// Resume parsing spawns Python + several LLM calls — keep it per-user and throttled.
+const parseLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many resume uploads — try again in a minute." },
+});
 
 const upload = multer({
   dest: os.tmpdir(),
@@ -28,7 +39,7 @@ const upload = multer({
 });
 
 // 🔥 Add try-catch wrapper (important)
-router.post("/parse-resume", upload.single("resume"), async (req, res) => {
+router.post("/parse-resume", protect, parseLimiter, upload.single("resume"), async (req, res) => {
   try {
     await parseResume(req, res);
   } catch (err) {
