@@ -13,12 +13,14 @@ import {
   duplicateWebsite,
   logAiGeneration,
   getPublishedWebsite,
+  checkSlugAvailability,
 } from "../controllers/customWebsiteController.js";
 
 const router = express.Router();
 
 // ── Public routes (no auth) ──────────────────────────────────────────────────
 router.get("/public/:slug", getPublishedWebsite);
+router.get("/slug-available/:slug", checkSlugAvailability);
 
 // ── Protected routes (JWT required) ─────────────────────────────────────────
 router.use(protect);

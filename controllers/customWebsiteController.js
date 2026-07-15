@@ -2,6 +2,28 @@
 
 import CustomWebsite from "../models/CustomWebsite.js";
 import mongoose from "mongoose";
+import { isReservedSubdomain } from "../lib/reservedSubdomains.js";
+
+// ── Helper: slugify + validate a user-supplied subdomain ────────────────────
+function normalizeSlug(raw) {
+  const slug = String(raw || "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug;
+}
+
+function validateSlugFormat(slug) {
+  if (!slug || slug.length < 3 || slug.length > 32) {
+    return "Address must be between 3 and 32 characters.";
+  }
+  if (!/^[a-z0-9-]+$/.test(slug)) {
+    return "Address can only contain letters, numbers, and hyphens.";
+  }
+  return null;
+}
 
 // ── Helper: verify ownership ──────────────────────────────────────────────────
 async function getOwnedSite(siteId, userId) {
@@ -12,7 +34,7 @@ async function getOwnedSite(siteId, userId) {
 // ── CREATE ────────────────────────────────────────────────────────────────────
 export async function createWebsite(req, res) {
   try {
-    const { title, industry, pages, activePage, settings } = req.body;
+    const { title, industry, pages, activePage, settings, slug } = req.body;
     const userId = req.user._id;
 
     // Default first page
@@ -26,14 +48,40 @@ export async function createWebsite(req, res) {
       bgType:   "solid",
     };
 
-    const site = await CustomWebsite.create({
-      userId,
-      title:      title || "My Website",
-      industry:   industry || "general",
-      pages:      pages || [defaultPage],
-      activePage: activePage || defaultPage.id,
-      settings:   settings || {},
-    });
+    let cleanSlug;
+    if (slug !== undefined && slug !== null && slug !== "") {
+      const normalized = normalizeSlug(slug);
+      const formatError = validateSlugFormat(normalized);
+      if (formatError) {
+        return res.status(400).json({ success: false, message: formatError });
+      }
+      if (isReservedSubdomain(normalized)) {
+        return res.status(400).json({ success: false, message: "That address is reserved and cannot be used." });
+      }
+      const existing = await CustomWebsite.findOne({ slug: normalized });
+      if (existing) {
+        return res.status(409).json({ success: false, message: "That address is already taken" });
+      }
+      cleanSlug = normalized;
+    }
+
+    let site;
+    try {
+      site = await CustomWebsite.create({
+        userId,
+        title:      title || "My Website",
+        industry:   industry || "general",
+        pages:      pages || [defaultPage],
+        activePage: activePage || defaultPage.id,
+        settings:   settings || {},
+        ...(cleanSlug ? { slug: cleanSlug } : {}),
+      });
+    } catch (createErr) {
+      if (createErr && createErr.code === 11000 && createErr.keyPattern?.slug) {
+        return res.status(409).json({ success: false, message: "That address is already taken" });
+      }
+      throw createErr;
+    }
 
     res.status(201).json({ success: true, site });
   } catch (err) {
@@ -74,7 +122,7 @@ export async function saveWebsite(req, res) {
     const site = await getOwnedSite(req.params.id, req.user._id);
     if (!site) return res.status(404).json({ success: false, message: "Website not found" });
 
-    const { pages, activePage, title, industry, settings, thumbnail } = req.body;
+    const { pages, activePage, title, industry, settings, thumbnail, slug } = req.body;
 
     if (pages      !== undefined) site.pages      = pages;
     if (activePage !== undefined) site.activePage = activePage;
@@ -83,11 +131,64 @@ export async function saveWebsite(req, res) {
     if (settings   !== undefined) site.settings   = { ...site.settings, ...settings };
     if (thumbnail  !== undefined) site.thumbnail  = thumbnail;
 
-    await site.save();
-    res.json({ success: true, updatedAt: site.updatedAt });
+    if (slug !== undefined && slug !== null && slug !== "") {
+      const normalized = normalizeSlug(slug);
+      const formatError = validateSlugFormat(normalized);
+      if (formatError) {
+        return res.status(400).json({ success: false, message: formatError });
+      }
+      if (isReservedSubdomain(normalized)) {
+        return res.status(400).json({ success: false, message: "That address is reserved and cannot be used." });
+      }
+      const existing = await CustomWebsite.findOne({ slug: normalized, _id: { $ne: site._id } });
+      if (existing) {
+        return res.status(409).json({ success: false, message: "That address is already taken" });
+      }
+      site.slug = normalized;
+    }
+
+    try {
+      await site.save();
+    } catch (saveErr) {
+      if (saveErr && saveErr.code === 11000 && saveErr.keyPattern?.slug) {
+        return res.status(409).json({ success: false, message: "That address is already taken" });
+      }
+      throw saveErr;
+    }
+
+    res.json({ success: true, updatedAt: site.updatedAt, slug: site.slug });
   } catch (err) {
     console.error("[customWebsite] save:", err);
     res.status(500).json({ success: false, message: err.message });
+  }
+}
+
+// ── SLUG AVAILABILITY (public) ────────────────────────────────────────────────
+export async function checkSlugAvailability(req, res) {
+  try {
+    const { slug: rawSlug } = req.params;
+    const { siteId } = req.query;
+    const slug = normalizeSlug(rawSlug);
+
+    const formatError = validateSlugFormat(slug);
+    if (formatError) {
+      return res.json({ available: false, reason: formatError });
+    }
+    if (isReservedSubdomain(slug)) {
+      return res.json({ available: false, reason: "That address is reserved and cannot be used." });
+    }
+
+    const query = { slug };
+    if (siteId && mongoose.Types.ObjectId.isValid(siteId)) {
+      query._id = { $ne: siteId };
+    }
+    const existing = await CustomWebsite.findOne(query, { _id: 1 });
+    if (existing) {
+      return res.json({ available: false, reason: "That address is already taken" });
+    }
+    res.json({ available: true });
+  } catch (err) {
+    res.status(500).json({ available: false, reason: "Could not check availability right now." });
   }
 }
 

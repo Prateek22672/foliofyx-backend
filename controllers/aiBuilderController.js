@@ -32,16 +32,19 @@ export function getGroq() {
 }
 
 // Model fallback order — first is tried first, we fall back on rate limits.
+// Creation-time copy is quality-critical: the 70B model writes dramatically
+// better, more specific copy, so it goes FIRST; the 8B instant model is only
+// the availability fallback.
 const MODELS = [
-  { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B", maxOut: 3500 },
   { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B", maxOut: 3500 },
+  { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B", maxOut: 3500 },
 ];
 
 // Element types whose `content` is user-facing copy we want personalized.
 const PERSONALIZABLE = new Set([
   "heading", "subheading", "paragraph", "label", "button", "quote", "list",
   "feature", "service", "stats", "testimonial", "pricing", "property", "team",
-  "faq", "timeline", "cta", "logostrip", "navbar",
+  "faq", "timeline", "cta", "logostrip", "navbar", "footer",
 ]);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -73,29 +76,63 @@ export function parseObject(raw) {
 // ── RAG step 3: rewrite the template's copy to match the brief ────────────────
 async function personalizeCopy(brief, industry, slots) {
   // RAG: pull copywriting + industry craft chunks for this brief.
-  const ragContext = buildDesignContext(`${brief} headlines copywriting voice`, { k: 3, industry });
+  const ragContext = buildDesignContext(`${brief} headlines copywriting voice tone`, { k: 4, industry });
+  const year = new Date().getFullYear();
 
-  const sys = `You are a senior website conversion copywriter. You receive a JSON object that maps element ids to their current placeholder text, plus a client brief. Rewrite EACH value so the whole page reads as one cohesive, specific, professional ${industry} website tailored to the brief.
+  const sys = `You are a senior conversion copywriter at a top design studio. You receive a JSON object mapping element ids to their current placeholder text, plus a client brief. Rewrite EVERY value so the whole page reads as one cohesive, professional ${industry} website written specifically for THIS client.
+
+STEP 1 — extract the concrete facts from the brief before writing anything: business name, city or neighborhood, cuisine / product / service specifics, audience, and price point. Every fact the client gives you MUST appear somewhere in the copy. If the brief names the business, use that exact name in the navbar brand, hero, CTA, and footer copyright — never keep the placeholder brand.
+
+STEP 2 — write to these quality bars:
+- Specific beats generic: every line should be concrete enough that it could only belong to this business ("Single-origin beans roasted in Indiranagar" — never "great products and services").
+- Lead with the benefit to the customer, not a description of the company.
+- Headlines: 8 words maximum, no ending period, strong and confident.
+- Labels (ALL-CAPS kickers above headings): 2 to 5 words.
+- Buttons: 2 to 4 words, starting with an action verb ("Reserve a Table", "See the Menu").
+- Stats, prices, and menu prices must be realistic for the industry and the client's city/currency.
+- Testimonials must sound like real, distinct people: give them plausible local names and specific outcomes.
+- FORBIDDEN (never output these or close variants): "Welcome to our website", "Lorem", "Your success is our priority", "Look no further", "We are the best", "high-quality solutions", "one-stop shop", "unlock your potential", "in today's fast-paced world", "your satisfaction is our", "wide range of". No square brackets, no TODO, no placeholders.
+- Never ADD new emojis to prose. Typographic symbols are fine and must be preserved: keep the © in copyright lines, keep stars/currency symbols. When a "|" segment is a single emoji or icon glyph (like a feature card's icon slot), copy that segment through EXACTLY as given — never delete or empty it.
+- Footer copyright lines keep the exact format "© ${year} <Brand>. All rights reserved." with the client's brand name (the © character is required).
 
 ${ragContext}
 
 STRICT OUTPUT RULES:
-- Return ONLY a JSON object with the EXACT same keys you were given. No markdown, no comments.
-- If a value contains "|" characters, it maps to fixed layout slots — return the SAME number of "|" segments, in the same order and meaning (e.g. stat is "number|label"; pricing is "plan|price|period|description|feature|feature..."; testimonial is "quote|name|role"; feature is "title|description|emoji"; property is "name|price|details"). NEVER add or remove "|" segments. Keep any leading emoji.
-- Keep copy concise, concrete, and believable. Real headlines, real benefits, realistic numbers/prices. No lorem ipsum, no square brackets, no placeholders.`;
+- Return ONLY a JSON object with the EXACT same keys you were given. No markdown, no comments, no extra keys.
+- If a value contains "|" characters, it maps to fixed layout slots — return the SAME number of "|" segments, in the same order and meaning (stat is "number|label"; pricing is "plan|price|period|description|feature|feature..."; testimonial is "quote|name|role"; feature is "title|description|icon"; property is "name|price|details"; logostrip is "name|name|name..."). NEVER add or remove "|" segments.`;
 
   const user = `CLIENT BRIEF: ${brief}\n\nTEXT TO REWRITE (return the same JSON keys):\n${JSON.stringify(slots)}`;
 
-  const { text, model } = await callGroq([
-    { role: "system", content: sys },
-    { role: "user", content: user },
-  ]);
+  const { text, model } = await callGroq(
+    [
+      { role: "system", content: sys },
+      { role: "user", content: user },
+    ],
+    3500,
+    MODELS,
+    { temperature: 0.55, responseFormat: { type: "json_object" } }
+  );
   return { map: parseObject(text), model };
 }
 
 // Same number of "|" segments → safe to swap without breaking the layout.
 function sameShape(orig = "", next = "") {
   return String(orig).split("|").length === String(next).split("|").length;
+}
+
+// Deterministic repair of model slips the prompt alone can't guarantee:
+// any segment the model emptied (usually the icon slot) is restored from the
+// original, and a dropped © in copyright lines is put back.
+function mergeSegments(orig = "", next = "") {
+  const o = String(orig).split("|");
+  const merged = String(next)
+    .split("|")
+    .map((seg, i) => (seg.trim() === "" && o[i] && o[i].trim() !== "" ? o[i] : seg))
+    .join("|");
+  if (String(orig).trimStart().startsWith("©") && !merged.includes("©")) {
+    return "© " + merged.trimStart();
+  }
+  return merged;
 }
 
 const freshId = (i) => `el_${Date.now()}_${i}_${Math.random().toString(36).slice(2, 6)}`;
@@ -123,7 +160,7 @@ export async function generatePageElements(prompt) {
         const nv = map[el.id];
         if (typeof nv === "string" && nv.trim() && sameShape(el.content, nv)) {
           personalized = true;
-          return { ...el, content: nv };
+          return { ...el, content: mergeSegments(el.content, nv) };
         }
         return el;
       });

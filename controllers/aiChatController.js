@@ -54,12 +54,23 @@ const freshId = (i) => `el_${Date.now()}_${i}_${Math.random().toString(36).slice
 
 // ── Intent routing ────────────────────────────────────────────────────────────
 function routeIntent(text, hasElements) {
-  const t = text.toLowerCase();
-  const wantsNew = /(create|build|make|generate|start|design)\b.{0,40}\b(website|site|page|portfolio|store|shop|landing)/.test(t) ||
-                   /^(new site|start over|from scratch)/.test(t);
-  const isQuestion = /^(what|why|how|which|should|can you explain|advice|suggest)\b/.test(t) && !wantsNew;
-  if (!hasElements) return isQuestion ? "chat" : "create";
-  if (wantsNew && /(new|another|different|start over|from scratch|replace)/.test(t)) return "create";
+  const t = text.toLowerCase().trim();
+  const greeting = /^(hi+|hello|hey+|yo|thanks?|thank you|good (morning|afternoon|evening))[!,. ]*$/.test(t);
+  const wantsNew =
+    /(create|build|make|generate|start|design|redo|rebuild)\b.{0,40}\b(website|site|page|portfolio|store|shop|landing)/.test(t) ||
+    /^(new site|start over|from scratch)/.test(t);
+  const isQuestion =
+    /^(what|why|how|which|should|would|is it|are there|do you|can you (explain|recommend|suggest)|advice|suggest|recommend)\b/.test(t) &&
+    !wantsNew;
+  // Concrete edit language ("change the hero", "warmer palette", "shorter headline")
+  // beats question phrasing when a canvas exists.
+  const editVerb =
+    /\b(change|update|edit|set|move|resize|rename|rewrite|reword|shorten|shorter|longer|bigger|smaller|larger|swap|replace|delete|remove|add|insert|align|center|centre|darker|lighter|warmer|cooler|bolder|palette|colou?rs?|font|headline|heading|title|hero|button|cta|image|photo|section|footer|navbar|menu|testimonial|pricing|stat|spacing|background)\b/.test(t);
+
+  if (!hasElements) return greeting || isQuestion ? "chat" : "create";
+  if (wantsNew && /(new|another|different|start over|from scratch|replace|redo|rebuild)/.test(t)) return "create";
+  if (greeting) return "chat";
+  if (editVerb) return "edit";
   if (isQuestion) return "chat";
   return "edit";
 }
@@ -145,12 +156,34 @@ function applyOps(elements, ops) {
   return { elements, applied, notes };
 }
 
-// ── Edit intent: LLM proposes ops, we apply them safely ──────────────────────
+// Pre-validate model ops against the real canvas: unknown ids/types/op names
+// are dropped with a reason instead of silently mangling (or 500-ing) anything.
+function validateOps(rawOps, elements) {
+  const knownIds = new Set(elements.map((e) => e.id));
+  const ops = [];
+  const rejected = [];
+  for (const op of (Array.isArray(rawOps) ? rawOps : []).slice(0, MAX_OPS)) {
+    if (!op || typeof op !== "object") {
+      rejected.push("a malformed op");
+    } else if (op.op === "update" || op.op === "remove") {
+      if (knownIds.has(op.id)) ops.push(op);
+      else rejected.push(`${op.op} on unknown element "${String(op.id).slice(0, 30)}"`);
+    } else if (op.op === "add") {
+      if (op.element && ALLOWED_TYPES.has(op.element.type)) ops.push(op);
+      else rejected.push(`add with unsupported type "${String(op.element?.type).slice(0, 30)}"`);
+    } else {
+      rejected.push(`unknown op "${String(op.op).slice(0, 20)}"`);
+    }
+  }
+  return { ops, rejected };
+}
+
+// ── Edit intent: LLM proposes ops, we validate and apply them safely ─────────
 async function editWithAI(instruction, history, page, industry) {
-  const ragContext = buildDesignContext(instruction, { k: 3, industry });
+  const ragContext = buildDesignContext(instruction, { k: 4, industry });
   const summary = summarizeElements(page.elements);
 
-  const sys = `You are an expert web designer operating a canvas website editor. The canvas is ${CANVAS_W}px wide; elements are absolutely positioned (x from left, y from top, in px). You receive the current elements and an instruction. Respond with ONLY a JSON object:
+  const sys = `You are an expert web designer operating a canvas website editor. The canvas is ${CANVAS_W}px wide; elements are absolutely positioned (x from left, y from top, in px). Full-width "section" elements are background bands sitting behind the content (zIndex 1); foreground content sits on top of them. You receive the current elements and an instruction. Respond with ONLY a JSON object:
 {"reply": "one short friendly sentence describing what you changed",
  "ops": [
    {"op":"update","id":"<existing id>","set":{"content"?, "x"?, "y"?, "width"?, "height"?, "src"?, "href"?, "styles"?:{...}}},
@@ -159,11 +192,14 @@ async function editWithAI(instruction, history, page, industry) {
  ]}
 
 RULES:
+- Use ONLY ids that exist in CURRENT ELEMENTS. Never invent ids.
 - Keep the existing design language (fonts, colors, spacing) unless asked to change it.
-- Multi-part elements use "|" separators in content (feature = "title|description|emoji", testimonial = "quote|name|role", stats = "number|label", pricing = "plan|price|period|description|feature|feature"). NEVER change the number of "|" segments on update.
-- Never overlap elements: leave at least 16px between them; y grows downward.
+- Palette/color changes must stay coherent: update the section band bgColors AND keep every text color readable against its band (light text on dark bands, dark text on light bands). Update buttons/gradients to match.
+- Copy quality: headlines 8 words max, specific and benefit-led. Never write filler like "Welcome to our website". No emojis in any copy.
+- Multi-part elements use "|" separators in content (feature = "title|description|icon", testimonial = "quote|name|role", stats = "number|label", pricing = "plan|price|period|description|feature|feature"). NEVER change the number of "|" segments on update.
+- Never overlap foreground elements: leave at least 16px between them; y grows downward. Background "section" bands may sit behind content.
 - Style keys allowed: ${[...STYLE_KEYS].join(", ")}. Colors are hex strings, fontSize is a number.
-- Prefer few precise ops over many. Max ${MAX_OPS} ops.
+- Prefer few precise ops over many. Max ${MAX_OPS} ops. If the request cannot be done with these ops, return {"reply":"<explain briefly>","ops":[]}.
 
 ${ragContext}`;
 
@@ -178,14 +214,33 @@ ${ragContext}`;
     responseFormat: { type: "json_object" },
   });
   const parsed = parseObject(text);
-  const { elements, applied, notes } = applyOps([...page.elements.map((e) => (e.toObject ? e.toObject() : { ...e, styles: { ...(e.styles || {}) } }))], parsed.ops);
+  const { ops, rejected } = validateOps(parsed.ops, page.elements);
+
+  // Nothing valid to do — answer honestly and conversationally instead of
+  // failing (and never echo a model reply that claims a change happened).
+  if (!ops.length) {
+    return {
+      reply:
+        "I didn't change anything — I couldn't map that request onto the elements currently on the canvas. " +
+        "Try pointing me at a section, for example: \"make the hero headline shorter\" or \"change the pricing card colors\".",
+      elements: null,
+      applied: 0,
+      notes: rejected,
+      model,
+    };
+  }
+
+  const { elements, applied, notes } = applyOps(
+    [...page.elements.map((e) => (e.toObject ? e.toObject() : { ...e, styles: { ...(e.styles || {}) } }))],
+    ops
+  );
   return {
     reply: typeof parsed.reply === "string" && parsed.reply.trim()
       ? parsed.reply.trim()
       : `Done — applied ${applied} change${applied === 1 ? "" : "s"}.`,
     elements,
     applied,
-    notes,
+    notes: [...rejected, ...notes],
     model,
   };
 }
@@ -256,12 +311,16 @@ export async function chatMessage(req, res) {
 
     const industry = await classifyIndustry(instruction + " " + (site?.industry || ""));
 
-    // EDIT — validated ops on the active page.
+    // EDIT — validated ops on the active page. Invalid/unmappable model output
+    // degrades to a helpful chat reply (never a 500, never a corrupted canvas).
     if (intent === "edit" && activePage) {
-      const { reply, elements, applied, model } = await editWithAI(
+      const { reply, elements, applied, model, notes } = await editWithAI(
         instruction, messages.slice(0, -1), activePage, industry
       );
-      return res.json({ intent, reply, elements, applied, model, pageId: activePage.id });
+      if (!applied || !elements) {
+        return res.json({ intent: "chat", reply, applied: 0, model, notes, pageId: activePage.id });
+      }
+      return res.json({ intent, reply, elements, applied, model, notes, pageId: activePage.id });
     }
 
     // CHAT — grounded advice.
