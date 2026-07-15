@@ -17,6 +17,8 @@ import referenceRoutes from "./routes/referenceRoutes.js";
 import aiChatRoutes from "./routes/aiChatRoutes.js";
 import domainRoutes from "./routes/domainRoutes.js";
 import CustomWebsite from "./models/CustomWebsite.js";
+import Portfolio from "./models/Portfolio.js";
+import { RESERVED_SUBDOMAINS } from "./lib/reservedSubdomains.js";
 import { renderSiteHTML } from "./lib/siteRenderer.js";
 
 
@@ -36,26 +38,63 @@ const APP_HOSTS = new Set([
   "localhost", "127.0.0.1",
   "foliofyx.netlify.app", "foliofyx.in", "www.foliofyx.in",
 ]);
-const domainCache = new Map(); // host → { site, ts }
+
+// Subdomain labels that must never resolve to a user site. The API itself
+// (foliofyx-backend.onrender.com / api.foliofyx.in) is protected by APP_HOSTS
+// and the reserved list; everything else on *.foliofyx.in is a user handle.
+const ROOT_DOMAIN = "foliofyx.in";
+
+const domainCache = new Map(); // host → { site, portfolioId, ts }
 const DOMAIN_TTL = 60_000;
 
 app.use(async (req, res, next) => {
   try {
-    const host = String(req.hostname || "").toLowerCase().replace(/^www\./, "");
-    if (!host || APP_HOSTS.has(req.hostname) || APP_HOSTS.has(host)) return next();
+    const rawHost = String(req.hostname || "").toLowerCase();
+    const host = rawHost.replace(/^www\./, "");
+    if (!host || APP_HOSTS.has(rawHost) || APP_HOSTS.has(host)) return next();
     if (req.path.startsWith("/api") || req.path.startsWith("/uploads")) return next();
+
+    // ── Wildcard subdomains: rahul.foliofyx.in → published site with slug
+    //    "rahul" (SSR), or a legacy portfolio with username "rahul" (redirect).
+    //    Requires the *.foliofyx.in DNS record + wildcard domain on the host.
+    const isSub = host.endsWith(`.${ROOT_DOMAIN}`) && host !== ROOT_DOMAIN;
+    const label = isSub ? host.slice(0, -(ROOT_DOMAIN.length + 1)) : null;
+    if (isSub && (RESERVED_SUBDOMAINS.has(label) || label.includes("."))) return next();
 
     let hit = domainCache.get(host);
     if (!hit || Date.now() - hit.ts > DOMAIN_TTL) {
-      const site = await CustomWebsite.findOne({
-        "customDomain.name": host,
-        "customDomain.status": { $in: ["verified", "live"] },
-        status: "published",
-      }).lean();
-      hit = { site, ts: Date.now() };
+      let site = null;
+      let portfolioId = null;
+
+      if (isSub) {
+        site = await CustomWebsite.findOne({ slug: label, status: "published" }).lean();
+        if (!site) {
+          const p = await Portfolio.findOne({ username: label }).select("_id").lean();
+          if (p) portfolioId = String(p._id);
+        }
+      } else {
+        // Connected custom domains (yourname.com), as before.
+        site = await CustomWebsite.findOne({
+          "customDomain.name": host,
+          "customDomain.status": { $in: ["verified", "live"] },
+          status: "published",
+        }).lean();
+      }
+
+      hit = { site, portfolioId, ts: Date.now() };
       domainCache.set(host, hit);
     }
-    if (!hit.site) return next();
+
+    // Legacy portfolios render client-side — send the subdomain to the app.
+    if (hit.portfolioId) {
+      return res.redirect(302, `https://${ROOT_DOMAIN}/portfolio/${hit.portfolioId}`);
+    }
+
+    if (!hit.site) {
+      // Unclaimed subdomain: land on the homepage instead of a dead 404.
+      if (isSub) return res.redirect(302, `https://${ROOT_DOMAIN}/`);
+      return next();
+    }
 
     const html = renderSiteHTML(hit.site, {
       pageSlug: req.path === "/" ? "/" : req.path.replace(/\/$/, ""),

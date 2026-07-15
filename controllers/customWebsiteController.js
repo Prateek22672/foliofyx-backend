@@ -108,6 +108,9 @@ export async function publishWebsite(req, res) {
     res.json({
       success: true,
       publishedUrl: site.publishedUrl,
+      // Wildcard subdomain (needs the *.foliofyx.in DNS record + wildcard
+      // domain on the host — see the host middleware in server.js).
+      subdomainUrl: `https://${site.slug}.foliofyx.in`,
       slug: site.slug,
       customDomain: site.customDomain?.status === "live" ? site.customDomain.name : null,
     });

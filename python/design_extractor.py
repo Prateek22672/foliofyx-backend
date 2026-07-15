@@ -84,13 +84,32 @@ def extract_palette(im):
     mids = sorted(pal[:6], key=lambda kv: abs(lum(kv[0]) - 128))
     muted = mids[0][0] if mids else (148, 163, 184)
 
+    # band/surface = the next frequent colour close in luminance to the bg
+    # (used for alternating section bands and card surfaces).
+    band = bg
+    for c, _ in pal[1:6]:
+        if abs(lum(c) - bg_lum) < 40 and c != text and c != accent:
+            band = c
+            break
+
+    # Exactly FIVE role-ordered swatches with ONE accent: bg, band, text,
+    # muted, accent (deduped, padded from the remaining dominant colours).
+    swatches = []
+    for c in [bg, band, text, muted, accent] + [c for c, _ in pal]:
+        h = hexof(c)
+        if h not in swatches:
+            swatches.append(h)
+        if len(swatches) == 5:
+            break
+
     return {
         "bg": hexof(bg),
+        "band": hexof(band),
         "text": hexof(text),
         "accent": hexof(accent),
         "muted": hexof(muted),
         "dark": bool(dark),
-        "swatches": [hexof(c) for c, _ in pal[:6]],
+        "swatches": swatches,
     }
 
 

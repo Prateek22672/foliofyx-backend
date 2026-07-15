@@ -29,7 +29,22 @@ const refLimiter = rateLimit({
   message: { message: "Too many reference requests. Please slow down and try again shortly." },
 });
 
-// upload.single is a no-op for JSON (text mode) bodies, so this one route serves all modes.
-router.post("/analyze", protect, refLimiter, upload.single("image"), analyzeReference);
+// Multer errors (wrong type, >12MB) must come back as structured JSON the
+// client can show — not a hang or an HTML error page from the default handler.
+function uploadImage(req, res, next) {
+  upload.single("image")(req, res, (err) => {
+    if (err) {
+      const message =
+        err.code === "LIMIT_FILE_SIZE"
+          ? "Image is too large (max 12MB). Please upload a smaller screenshot."
+          : err.message || "Upload failed. Please try a different image.";
+      return res.status(400).json({ message });
+    }
+    next();
+  });
+}
+
+// uploadImage is a no-op for JSON (text mode) bodies, so this one route serves all modes.
+router.post("/analyze", protect, refLimiter, uploadImage, analyzeReference);
 
 export default router;

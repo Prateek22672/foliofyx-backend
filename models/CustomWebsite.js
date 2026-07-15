@@ -3,6 +3,7 @@
 // Stores canvas-based websites built with the custom builder.
 
 import mongoose from "mongoose";
+import { isReservedSubdomain } from "../lib/reservedSubdomains.js";
 
 // ── Element style schema ─────────────────────────────────────────────────────
 const StyleSchema = new mongoose.Schema({
@@ -191,6 +192,11 @@ CustomWebsiteSchema.pre("save", async function (next) {
       .slice(0, 40);
     const rand  = Math.random().toString(36).slice(2, 7);
     this.slug   = `${base}-${rand}`;
+  }
+  // Reserved labels (www, api, admin…) double as *.foliofyx.in subdomains —
+  // suffix rather than reject so an unlucky title never blocks a save.
+  if (this.slug && isReservedSubdomain(this.slug)) {
+    this.slug = `${this.slug}-${Math.random().toString(36).slice(2, 6)}`;
   }
   next();
 });

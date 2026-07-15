@@ -1,5 +1,6 @@
 import Portfolio from "../models/Portfolio.js";
 import User from "../models/User.js";
+import { isReservedSubdomain } from "../lib/reservedSubdomains.js";
 import jwt from "jsonwebtoken";
 import path from "path";
 import fs from "fs";
@@ -75,6 +76,14 @@ export const savePortfolio = async (req, res) => {
       imagePath = `/uploads/${req.file.filename}`;
     } else if (data.image) {
       imagePath = data.image;
+    }
+
+    // Reserved labels (www, api, admin…) can never be claimed as a username —
+    // they double as *.foliofyx.in subdomains (see lib/reservedSubdomains.js).
+    if (data.username && isReservedSubdomain(data.username)) {
+      return res.status(400).json({
+        message: `"${data.username}" is a reserved name — please choose a different username.`,
+      });
     }
 
     // --- PREPARE CLEAN DATA ---

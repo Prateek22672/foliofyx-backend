@@ -27,7 +27,10 @@ const GROQ_MODELS = [
 ];
 
 const PYTHON_SCRIPT = path.join(__dirname, "../python/resume_extractor.py");
-const PYTHON_BIN    = process.platform === "win32" ? "python" : "python3";
+// Overridable so deployments can point at the interpreter that actually has
+// pdfplumber/pymupdf installed (e.g. PYTHON_BIN=C:\...\Python313\python.exe).
+const PYTHON_BIN =
+  process.env.PYTHON_BIN || (process.platform === "win32" ? "python" : "python3");
 
 // Per-extractor input budget. The 70B has plenty of context; the old 4000-char
 // blind cut regularly dropped the bottom half of dense resumes.
@@ -440,18 +443,73 @@ function sanitizeString(val, fallback = "") {
   return isJunk(v) ? fallback : v;
 }
 
+// A URL is only accepted for linkedin/github when it actually points there.
+function sanitizeUrl(val, hostRe) {
+  const v = cleanStr(val);
+  if (isJunk(v) || !hostRe.test(v)) return "";
+  return /^https?:\/\//i.test(v) ? v : `https://${v}`;
+}
+
+/**
+ * Last-resort name repair: derive a display name from the email local-part
+ * ("jane.doe99@x.com" → "Jane Doe").
+ */
+function nameFromEmail(email) {
+  const local = String(email || "").split("@")[0];
+  if (!local) return "";
+  const words = local
+    .replace(/\d+/g, " ")
+    .split(/[._\-+]+/)
+    .map((w) => w.trim())
+    .filter((w) => w.length > 1)
+    .slice(0, 3)
+    .map((w) => w[0].toUpperCase() + w.slice(1).toLowerCase());
+  return words.join(" ");
+}
+
+// Regex fallback when even the full-text LLM scan yields too few skills:
+// scan for well-known technologies directly.
+const KNOWN_SKILLS = [
+  "JavaScript", "TypeScript", "Python", "Java", "C++", "C#", "Go", "Rust",
+  "PHP", "Ruby", "Swift", "Kotlin", "SQL", "HTML", "CSS", "React", "Angular",
+  "Vue", "Next.js", "Node.js", "Express", "Django", "Flask", "Spring",
+  "MongoDB", "PostgreSQL", "MySQL", "Redis", "Firebase", "AWS", "Azure",
+  "GCP", "Docker", "Kubernetes", "Git", "Linux", "GraphQL", "REST",
+  "TensorFlow", "PyTorch", "Pandas", "NumPy", "Tailwind", "Bootstrap",
+  "Figma", "Jenkins", "Terraform",
+];
+
+function regexSkillScan(fullText) {
+  if (!fullText) return [];
+  const found = [];
+  for (const skill of KNOWN_SKILLS) {
+    const escaped = skill.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`(?:^|[^a-zA-Z0-9])${escaped}(?:[^a-zA-Z0-9]|$)`, "i");
+    if (re.test(fullText)) found.push({ name: skill, level: "Intermediate" });
+    if (found.length >= 15) break;
+  }
+  return found;
+}
+
 /**
  * Build the final schema using AI-extracted identity (name/role/email)
- * instead of raw Python output for those fields.
+ * instead of raw Python output for those fields. linkedin/github come from
+ * the Python regex pass (URLs are extracted deterministically there).
  */
-function buildFinalSchema(identity, bio, education, skills, experience, projects) {
+function buildFinalSchema(identity, bio, education, skills, experience, projects, links = {}) {
+  let name = sanitizeString(identity.name);
+  if (!name && identity.email) {
+    name = nameFromEmail(identity.email);
+    if (name) console.log(`[ResumeParser] Name repaired from email local-part: "${name}"`);
+  }
+
   return {
-    name:       sanitizeString(identity.name),
+    name,
     role:       sanitizeString(identity.role),   // ← now guaranteed to be a job title
     bio:        sanitizeString(bio),
     email:      sanitizeString(identity.email),
-    linkedin:   "",                              // Python / Groq don't reliably get this; user fills it
-    github:     "",
+    linkedin:   sanitizeUrl(links.linkedin, /linkedin\.com/i),
+    github:     sanitizeUrl(links.github, /github\.com/i),
     cvLink:     "",
     education:  sanitizeString(education),
     skills:     skills.filter((s) => !isJunk(s.name)),
@@ -497,8 +555,20 @@ export const parseResume = async (req, res) => {
       raw.role = "";
     }
 
+    // 2b. Safety net: older extractor builds didn't emit raw_full — every
+    //     downstream fallback depends on it, so synthesize it from the
+    //     sections if it's missing.
+    if (!raw.raw_full || !String(raw.raw_full).trim()) {
+      raw.raw_full = [
+        raw.name, raw.role, raw.email, raw.phone, raw.linkedin, raw.github,
+        raw.raw_summary, raw.raw_education, raw.raw_skills,
+        raw.raw_experience, raw.raw_projects, raw.raw_certifications,
+      ].filter(Boolean).join("\n");
+      console.warn("[ResumeParser] raw_full missing from Python output — rebuilt from sections");
+    }
+
     // 3. Parallel Groq extractions
-    console.log(`[ResumeParser] Model: ${GROQ_MODEL} | Running 6 parallel extractions...`);
+    console.log(`[ResumeParser] Models: ${GROQ_MODELS.map((m) => m.label).join(" → ")} | Running 6 parallel extractions...`);
 
     const [identity, bio, education, skills, experience, projects] = await Promise.all([
       extractIdentity(raw),                                    // ← NEW: validates name/role/email
@@ -512,8 +582,30 @@ export const parseResume = async (req, res) => {
     console.log(`[ResumeParser] Identity → name="${identity.name}" role="${identity.role}" email="${identity.email}"`);
     console.log(`[ResumeParser] Done — skills:${skills.length} exp:${experience.length} proj:${projects.length}`);
 
-    // 4. Build final schema using AI identity instead of raw Python fields
-    const finalData = buildFinalSchema(identity, bio, education, skills, experience, projects);
+    // 3b. Sanity repair: a thin/odd skills section can yield almost nothing.
+    //     Rescan the FULL text, then fall back to a deterministic regex scan.
+    let finalSkills = skills;
+    if (finalSkills.length < 3 && raw.raw_skills?.trim()) {
+      console.log(`[ResumeParser] Only ${finalSkills.length} skills from section — rescanning full text`);
+      const fullScan = await extractSkills("", raw.raw_full);
+      if (fullScan.length > finalSkills.length) finalSkills = fullScan;
+    }
+    if (finalSkills.length < 3) {
+      const regexScan = regexSkillScan(raw.raw_full);
+      const have = new Set(finalSkills.map((s) => s.name.toLowerCase()));
+      for (const s of regexScan) {
+        if (!have.has(s.name.toLowerCase())) finalSkills.push(s);
+      }
+      finalSkills = finalSkills.slice(0, 15);
+      console.log(`[ResumeParser] Regex skill scan brought total to ${finalSkills.length}`);
+    }
+
+    // 4. Build final schema using AI identity instead of raw Python fields.
+    //    linkedin/github URLs come from the Python regex pass.
+    const finalData = buildFinalSchema(identity, bio, education, finalSkills, experience, projects, {
+      linkedin: raw.linkedin,
+      github:   raw.github,
+    });
 
     return res.status(200).json({ success: true, data: finalData });
 
