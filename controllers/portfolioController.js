@@ -1,4 +1,5 @@
 import Portfolio from "../models/Portfolio.js";
+import CustomWebsite from "../models/CustomWebsite.js";
 import User from "../models/User.js";
 import { isReservedSubdomain } from "../lib/reservedSubdomains.js";
 import jwt from "jsonwebtoken";
@@ -26,6 +27,30 @@ const verifyUser = async (req) => {
 // =========================================================
 // 💾 SAVE / UPDATE PORTFOLIO
 // =========================================================
+// Whitelist for the theme personalisation layer (ThemeSkin on the client).
+const DESIGN_ENUMS = {
+  imageCorners: ["default", "sharp", "soft", "round"],
+  texture: ["none", "grain", "dots", "grid", "lines", "diagonal"],
+  headWeight: ["default", "400", "600", "800"],
+};
+function sanitizePortfolioDesign(raw, fallback) {
+  let d = raw;
+  if (typeof d === "string") {
+    try { d = JSON.parse(d); } catch { d = null; }
+  }
+  if (d === undefined) return fallback ?? null;
+  if (!d || typeof d !== "object" || Array.isArray(d)) return null;
+  const out = {};
+  const font = String(d.headFont || "").replace(/[^\w\s-]/g, "").trim().slice(0, 60);
+  if (font) out.headFont = font;
+  for (const [k, allowed] of Object.entries(DESIGN_ENUMS)) {
+    if (allowed.includes(String(d[k]))) out[k] = String(d[k]);
+  }
+  const strength = Number(d.textureOpacity);
+  if (Number.isFinite(strength)) out.textureOpacity = Math.min(0.2, Math.max(0.02, strength));
+  return Object.keys(out).length ? out : null;
+}
+
 export const savePortfolio = async (req, res) => {
   try {
     const user = await verifyUser(req);
@@ -86,6 +111,22 @@ export const savePortfolio = async (req, res) => {
       });
     }
 
+    // A username is also a <name>.foliofyx.in label, so it can't collide with
+    // another user's website address. Only checked when it changes, so legacy
+    // usernames keep saving.
+    if (data.username) {
+      data.username = String(data.username).trim().toLowerCase();
+      if (data.username !== existingPortfolio?.username) {
+        if (!/^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])$/.test(data.username)) {
+          return res.status(400).json({ message: "Username must be 3-32 characters: letters, numbers and hyphens." });
+        }
+        const siteClash = await CustomWebsite.exists({ slug: data.username, userId: { $ne: userId } });
+        if (siteClash) {
+          return res.status(400).json({ message: "Username already taken. Please choose another." });
+        }
+      }
+    }
+
     // --- PREPARE CLEAN DATA ---
     const cleanData = {
       ...data,
@@ -104,6 +145,7 @@ export const savePortfolio = async (req, res) => {
       themeFontFamily: data.themeFontFamily || existingPortfolio?.themeFontFamily || "Switzer, sans-serif", // <--- ADD THIS
       accentColor: data.accentColor || existingPortfolio?.accentColor || "#A855F7",
       headerColor: data.headerColor || existingPortfolio?.headerColor || "#000000",
+      design: sanitizePortfolioDesign(data.design, existingPortfolio?.design),
 
       name: data.name || "",
       role: data.role || "",

@@ -1,92 +1,90 @@
 // server/controllers/customWebsiteController.js
+// CRUD + publish for CustomWebsite documents. Every write is sanitised
+// (lib/sanitizeSite.js) so editor or AI output can't trigger a CastError, and
+// every change that affects what a host serves invalidates the host cache.
 
-import CustomWebsite from "../models/CustomWebsite.js";
 import mongoose from "mongoose";
+import CustomWebsite from "../models/CustomWebsite.js";
+import Portfolio from "../models/Portfolio.js";
 import { isReservedSubdomain } from "../lib/reservedSubdomains.js";
+import {
+  sanitizePages, sanitizeSettings, sanitizeTitle, sanitizeIndustry, sanitizeThumbnail, countVisibleElements,
+} from "../lib/sanitizeSite.js";
+import { siteUrls } from "../lib/siteConfig.js";
+import { invalidateSite } from "../lib/hostCache.js";
+import { domainPayload, releaseDomain } from "../lib/domainService.js";
 
-// ── Helper: slugify + validate a user-supplied subdomain ────────────────────
-function normalizeSlug(raw) {
-  const slug = String(raw || "")
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9-]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return slug;
+const fail = (res, status, message, code) => res.status(status).json({ success: false, message, ...(code ? { code } : {}) });
+
+// ── Slugs (= the <slug>.foliofyx.in label) ───────────────────────────────────
+export function normalizeSlug(raw) {
+  return String(raw || "").toLowerCase().trim().replace(/[^a-z0-9-]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
 }
 
 function validateSlugFormat(slug) {
-  if (!slug || slug.length < 3 || slug.length > 32) {
-    return "Address must be between 3 and 32 characters.";
-  }
-  if (!/^[a-z0-9-]+$/.test(slug)) {
-    return "Address can only contain letters, numbers, and hyphens.";
+  if (!slug || slug.length < 3 || slug.length > 32) return "Address must be between 3 and 32 characters.";
+  if (!/^[a-z0-9-]+$/.test(slug)) return "Address can only contain letters, numbers and hyphens.";
+  return null;
+}
+
+/** null when usable, else { status, message, code }. Checks sites AND legacy portfolio usernames. */
+async function slugProblem(slug, { excludeSiteId, userId } = {}) {
+  const formatError = validateSlugFormat(slug);
+  if (formatError) return { status: 400, message: formatError, code: "SLUG_INVALID" };
+  if (isReservedSubdomain(slug)) return { status: 400, message: "That address is reserved and cannot be used.", code: "SLUG_RESERVED" };
+  const siteQuery = { slug, ...(excludeSiteId ? { _id: { $ne: excludeSiteId } } : {}) };
+  if (await CustomWebsite.exists(siteQuery)) return { status: 409, message: "That address is already taken.", code: "SLUG_TAKEN" };
+  // A user may reuse their own portfolio username for their own site.
+  const owner = await Portfolio.findOne({ username: slug }).select("userId").lean();
+  if (owner && (!userId || String(owner.userId) !== String(userId))) {
+    return { status: 409, message: "That address is already taken.", code: "SLUG_TAKEN" };
   }
   return null;
 }
 
-// ── Helper: verify ownership ──────────────────────────────────────────────────
 async function getOwnedSite(siteId, userId) {
   if (!mongoose.Types.ObjectId.isValid(siteId)) return null;
   return CustomWebsite.findOne({ _id: siteId, userId });
 }
 
+function isDupSlug(err) {
+  return err?.code === 11000 && (err.keyPattern?.slug || /slug/.test(err.message || ""));
+}
+
 // ── CREATE ────────────────────────────────────────────────────────────────────
 export async function createWebsite(req, res) {
   try {
-    const { title, industry, pages, activePage, settings, slug } = req.body;
-    const userId = req.user._id;
-
-    // Default first page
-    const defaultPage = {
-      id:       `page_${Date.now()}`,
-      name:     "Home",
-      slug:     "/",
-      pageType: "page",
-      elements: [],
-      bgColor:  "#ffffff",
-      bgType:   "solid",
-    };
+    const { title, industry, pages, activePage, settings, slug } = req.body || {};
+    const cleanPages = sanitizePages(pages);
+    const defaultPage = { id: `page_${Date.now()}`, name: "Home", slug: "/", pageType: "page", elements: [], bgColor: "#ffffff", bgType: "solid" };
+    const finalPages = cleanPages && cleanPages.length ? cleanPages : [defaultPage];
 
     let cleanSlug;
-    if (slug !== undefined && slug !== null && slug !== "") {
-      const normalized = normalizeSlug(slug);
-      const formatError = validateSlugFormat(normalized);
-      if (formatError) {
-        return res.status(400).json({ success: false, message: formatError });
-      }
-      if (isReservedSubdomain(normalized)) {
-        return res.status(400).json({ success: false, message: "That address is reserved and cannot be used." });
-      }
-      const existing = await CustomWebsite.findOne({ slug: normalized });
-      if (existing) {
-        return res.status(409).json({ success: false, message: "That address is already taken" });
-      }
-      cleanSlug = normalized;
+    if (slug) {
+      cleanSlug = normalizeSlug(slug);
+      const problem = await slugProblem(cleanSlug, { userId: req.user._id });
+      if (problem) return fail(res, problem.status, problem.message, problem.code);
     }
 
     let site;
     try {
       site = await CustomWebsite.create({
-        userId,
-        title:      title || "My Website",
-        industry:   industry || "general",
-        pages:      pages || [defaultPage],
-        activePage: activePage || defaultPage.id,
-        settings:   settings || {},
+        userId: req.user._id,
+        title: sanitizeTitle(title),
+        industry: sanitizeIndustry(industry),
+        pages: finalPages,
+        activePage: finalPages.some((p) => p.id === activePage) ? activePage : finalPages[0].id,
+        settings: sanitizeSettings(settings),
         ...(cleanSlug ? { slug: cleanSlug } : {}),
       });
-    } catch (createErr) {
-      if (createErr && createErr.code === 11000 && createErr.keyPattern?.slug) {
-        return res.status(409).json({ success: false, message: "That address is already taken" });
-      }
-      throw createErr;
+    } catch (err) {
+      if (isDupSlug(err)) return fail(res, 409, "That address is already taken.", "SLUG_TAKEN");
+      throw err;
     }
-
     res.status(201).json({ success: true, site });
   } catch (err) {
     console.error("[customWebsite] create:", err);
-    res.status(500).json({ success: false, message: err.message });
+    fail(res, 500, "Couldn't create your website. Please try again.");
   }
 }
 
@@ -94,10 +92,11 @@ export async function createWebsite(req, res) {
 export async function getWebsite(req, res) {
   try {
     const site = await getOwnedSite(req.params.id, req.user._id);
-    if (!site) return res.status(404).json({ success: false, message: "Website not found" });
-    res.json({ success: true, site });
+    if (!site) return fail(res, 404, "Website not found.");
+    res.json({ success: true, site, ...siteUrls(site, req) });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("[customWebsite] get:", err);
+    fail(res, 500, "Couldn't load your website.");
   }
 }
 
@@ -106,88 +105,77 @@ export async function getUserWebsites(req, res) {
   try {
     const sites = await CustomWebsite.find(
       { userId: req.user._id },
-      { title: 1, slug: 1, industry: 1, status: 1, thumbnail: 1, updatedAt: 1, "pages.name": 1 }
-    ).sort({ updatedAt: -1 }).limit(50);
+      { title: 1, slug: 1, industry: 1, status: 1, thumbnail: 1, updatedAt: 1, publishedAt: 1, "pages.name": 1, customDomain: 1 }
+    ).sort({ updatedAt: -1 }).limit(50).lean();
 
-    res.json({ success: true, sites });
+    res.json({
+      success: true,
+      sites: sites.map((s) => {
+        const urls = s.status === "published" ? siteUrls(s, req) : { publishedUrl: null, subdomainUrl: null, pathUrl: null, customDomainUrl: null };
+        const { customDomain, ...rest } = s;
+        return { ...rest, ...urls, customDomain: customDomain?.name ? domainPayload(s) : null };
+      }),
+    });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("[customWebsite] list:", err);
+    fail(res, 500, "Couldn't load your websites.");
   }
 }
 
 // ── SAVE / AUTO-SAVE ──────────────────────────────────────────────────────────
-// Called on every auto-save (debounced 3s on client)
 export async function saveWebsite(req, res) {
   try {
     const site = await getOwnedSite(req.params.id, req.user._id);
-    if (!site) return res.status(404).json({ success: false, message: "Website not found" });
+    if (!site) return fail(res, 404, "Website not found.");
 
-    const { pages, activePage, title, industry, settings, thumbnail, slug } = req.body;
+    const { pages, activePage, title, industry, settings, thumbnail, slug } = req.body || {};
+    const oldSlug = site.slug;
 
-    if (pages      !== undefined) site.pages      = pages;
-    if (activePage !== undefined) site.activePage = activePage;
-    if (title      !== undefined) site.title      = title;
-    if (industry   !== undefined) site.industry   = industry;
-    if (settings   !== undefined) site.settings   = { ...site.settings, ...settings };
-    if (thumbnail  !== undefined) site.thumbnail  = thumbnail;
+    if (pages !== undefined) {
+      const clean = sanitizePages(pages);
+      if (!clean) return fail(res, 400, "Pages must be a list.", "BAD_PAGES");
+      site.pages = clean;
+    }
+    if (activePage !== undefined && typeof activePage === "string") site.activePage = activePage.slice(0, 100);
+    if (title !== undefined) site.title = sanitizeTitle(title, site.title);
+    if (industry !== undefined) site.industry = sanitizeIndustry(industry);
+    if (settings !== undefined) site.settings = { ...(site.settings?.toObject?.() || site.settings || {}), ...sanitizeSettings(settings) };
+    if (thumbnail !== undefined) site.thumbnail = sanitizeThumbnail(thumbnail);
 
-    if (slug !== undefined && slug !== null && slug !== "") {
+    if (slug) {
       const normalized = normalizeSlug(slug);
-      const formatError = validateSlugFormat(normalized);
-      if (formatError) {
-        return res.status(400).json({ success: false, message: formatError });
+      if (normalized !== site.slug) {
+        const problem = await slugProblem(normalized, { excludeSiteId: site._id, userId: req.user._id });
+        if (problem) return fail(res, problem.status, problem.message, problem.code);
+        site.slug = normalized;
       }
-      if (isReservedSubdomain(normalized)) {
-        return res.status(400).json({ success: false, message: "That address is reserved and cannot be used." });
-      }
-      const existing = await CustomWebsite.findOne({ slug: normalized, _id: { $ne: site._id } });
-      if (existing) {
-        return res.status(409).json({ success: false, message: "That address is already taken" });
-      }
-      site.slug = normalized;
     }
 
     try {
       await site.save();
-    } catch (saveErr) {
-      if (saveErr && saveErr.code === 11000 && saveErr.keyPattern?.slug) {
-        return res.status(409).json({ success: false, message: "That address is already taken" });
-      }
-      throw saveErr;
+    } catch (err) {
+      if (isDupSlug(err)) return fail(res, 409, "That address is already taken.", "SLUG_TAKEN");
+      throw err;
     }
-
+    if (site.status === "published") invalidateSite(site, { oldSlug });
     res.json({ success: true, updatedAt: site.updatedAt, slug: site.slug });
   } catch (err) {
     console.error("[customWebsite] save:", err);
-    res.status(500).json({ success: false, message: err.message });
+    fail(res, 500, "Couldn't save your website. Please try again.");
   }
 }
 
 // ── SLUG AVAILABILITY (public) ────────────────────────────────────────────────
 export async function checkSlugAvailability(req, res) {
   try {
-    const { slug: rawSlug } = req.params;
+    const slug = normalizeSlug(req.params.slug);
     const { siteId } = req.query;
-    const slug = normalizeSlug(rawSlug);
-
-    const formatError = validateSlugFormat(slug);
-    if (formatError) {
-      return res.json({ available: false, reason: formatError });
-    }
-    if (isReservedSubdomain(slug)) {
-      return res.json({ available: false, reason: "That address is reserved and cannot be used." });
-    }
-
-    const query = { slug };
-    if (siteId && mongoose.Types.ObjectId.isValid(siteId)) {
-      query._id = { $ne: siteId };
-    }
-    const existing = await CustomWebsite.findOne(query, { _id: 1 });
-    if (existing) {
-      return res.json({ available: false, reason: "That address is already taken" });
-    }
+    const excludeSiteId = siteId && mongoose.Types.ObjectId.isValid(siteId) ? siteId : undefined;
+    const problem = await slugProblem(slug, { excludeSiteId, userId: req.user?._id });
+    if (problem) return res.json({ available: false, reason: problem.message, code: problem.code });
     res.json({ available: true });
   } catch (err) {
+    console.error("[customWebsite] slug check:", err);
     res.status(500).json({ available: false, reason: "Could not check availability right now." });
   }
 }
@@ -196,27 +184,22 @@ export async function checkSlugAvailability(req, res) {
 export async function publishWebsite(req, res) {
   try {
     const site = await getOwnedSite(req.params.id, req.user._id);
-    if (!site) return res.status(404).json({ success: false, message: "Website not found" });
+    if (!site) return fail(res, 404, "Website not found.");
+    if (countVisibleElements(site.pages) === 0) {
+      return fail(res, 400, "Your site is empty. Add some content before publishing.", "EMPTY_SITE");
+    }
 
-    site.status       = "published";
-    site.publishedAt  = new Date();
-    // The SSR host that actually serves /site/:slug (this API server) —
-    // override with PUBLIC_SITE_BASE when it lives behind its own domain.
-    const base = process.env.PUBLIC_SITE_BASE || `${req.protocol}://${req.get("host")}`;
-    site.publishedUrl = `${base}/site/${site.slug}`;
-
+    site.status = "published";
+    site.publishedAt = new Date();
+    const urls = siteUrls(site, req);
+    site.publishedUrl = urls.publishedUrl;
     await site.save();
-    res.json({
-      success: true,
-      publishedUrl: site.publishedUrl,
-      // Wildcard subdomain (needs the *.foliofyx.in DNS record + wildcard
-      // domain on the host — see the host middleware in server.js).
-      subdomainUrl: `https://${site.slug}.foliofyx.in`,
-      slug: site.slug,
-      customDomain: site.customDomain?.status === "live" ? site.customDomain.name : null,
-    });
+    invalidateSite(site);
+
+    res.json({ success: true, website: site, slug: site.slug, ...urls });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("[customWebsite] publish:", err);
+    fail(res, 500, "Publishing failed. Please try again.");
   }
 }
 
@@ -224,13 +207,14 @@ export async function publishWebsite(req, res) {
 export async function unpublishWebsite(req, res) {
   try {
     const site = await getOwnedSite(req.params.id, req.user._id);
-    if (!site) return res.status(404).json({ success: false, message: "Website not found" });
-
+    if (!site) return fail(res, 404, "Website not found.");
     site.status = "draft";
     await site.save();
+    invalidateSite(site);
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("[customWebsite] unpublish:", err);
+    fail(res, 500, "Couldn't unpublish the website.");
   }
 }
 
@@ -238,12 +222,15 @@ export async function unpublishWebsite(req, res) {
 export async function deleteWebsite(req, res) {
   try {
     const site = await getOwnedSite(req.params.id, req.user._id);
-    if (!site) return res.status(404).json({ success: false, message: "Website not found" });
-
+    if (!site) return fail(res, 404, "Website not found.");
+    const domain = site.customDomain?.name;
+    invalidateSite(site);
     await site.deleteOne();
+    if (domain) releaseDomain(domain);
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("[customWebsite] delete:", err);
+    fail(res, 500, "Couldn't delete the website.");
   }
 }
 
@@ -251,21 +238,20 @@ export async function deleteWebsite(req, res) {
 export async function duplicateWebsite(req, res) {
   try {
     const site = await getOwnedSite(req.params.id, req.user._id);
-    if (!site) return res.status(404).json({ success: false, message: "Website not found" });
-
+    if (!site) return fail(res, 404, "Website not found.");
     const copy = await CustomWebsite.create({
-      userId:     req.user._id,
-      title:      `${site.title} (Copy)`,
-      industry:   site.industry,
-      pages:      site.pages,
+      userId: req.user._id,
+      title: `${site.title} (Copy)`.slice(0, 120),
+      industry: site.industry,
+      pages: site.pages,
       activePage: site.activePage,
-      settings:   site.settings,
-      status:     "draft",
+      settings: site.settings,
+      status: "draft",
     });
-
     res.status(201).json({ success: true, site: copy });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("[customWebsite] duplicate:", err);
+    fail(res, 500, "Couldn't duplicate the website.");
   }
 }
 
@@ -273,40 +259,34 @@ export async function duplicateWebsite(req, res) {
 export async function logAiGeneration(req, res) {
   try {
     const site = await getOwnedSite(req.params.id, req.user._id);
-    if (!site) return res.status(404).json({ success: false, message: "Website not found" });
-
-    const { prompt, industry, elemCount } = req.body;
-
-    // Keep last 10 only
-    site.aiHistory.push({ prompt, industry, elemCount, createdAt: new Date() });
+    if (!site) return fail(res, 404, "Website not found.");
+    const { prompt, industry, elemCount } = req.body || {};
+    site.aiHistory.push({
+      prompt: String(prompt || "").slice(0, 2000),
+      industry: sanitizeIndustry(industry),
+      elemCount: Number(elemCount) || 0,
+      createdAt: new Date(),
+    });
     if (site.aiHistory.length > 10) site.aiHistory = site.aiHistory.slice(-10);
-
     await site.save();
     res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("[customWebsite] ai-log:", err);
+    fail(res, 500, "Couldn't log that generation.");
   }
 }
 
 // ── PUBLIC VIEW (no auth) ─────────────────────────────────────────────────────
 export async function getPublishedWebsite(req, res) {
   try {
-    const { slug } = req.params;
-    const site = await CustomWebsite.findOne({ slug, status: "published" });
-    if (!site) return res.status(404).json({ success: false, message: "Website not found or not published" });
-
-    // Return only what renderer needs
+    const site = await CustomWebsite.findOne({ slug: normalizeSlug(req.params.slug), status: "published" }).lean();
+    if (!site) return fail(res, 404, "Website not found or not published.");
     res.json({
       success: true,
-      site: {
-        title:      site.title,
-        pages:      site.pages,
-        activePage: site.activePage,
-        settings:   site.settings,
-        industry:   site.industry,
-      },
+      site: { title: site.title, pages: site.pages, activePage: site.activePage, settings: site.settings, industry: site.industry },
     });
   } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
+    console.error("[customWebsite] public:", err);
+    fail(res, 500, "Couldn't load that website.");
   }
 }

@@ -32,17 +32,13 @@ import { buildFromSpec, SECTION_CATALOG, REFERENCE_SECTION_TYPES } from "../data
 import { detectIndustry, aiAvailable, callGroq, parseObject, getGroq } from "./aiBuilderController.js";
 import { buildDesignContext, classifyIndustry } from "../rag/retriever.js";
 import { resolvePremiumTokens, polishElements, stockUrl } from "../data/designSystem.js";
+import { textModels, visionModelIds } from "../lib/aiModels.js";
 
-// Multimodal models — these actually SEE the screenshot (current Groq vision LLMs).
-const VISION_MODELS = [
-  "meta-llama/llama-4-scout-17b-16e-instruct",
-  "meta-llama/llama-4-maverick-17b-128e-instruct",
-];
-// Prefer the strong text model for the no-image (describe) path.
-const TEXT_MODELS = [
-  { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B", maxOut: 3800 },
-  { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B", maxOut: 3800 },
-];
+// Multimodal models that actually SEE the screenshot. Groq retired its Llama 4
+// vision models; set GROQ_VISION_MODELS when a vision model is available.
+// With none configured the image path uses the CV extractor + text models.
+const VISION_MODELS = visionModelIds();
+const TEXT_MODELS = textModels(6000);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -256,7 +252,7 @@ async function mapToSpec({ cv, description, industry, ragContext }) {
   const { text, model } = await callGroq([
     { role: "system", content: buildSysPrompt(false, ragContext) },
     { role: "user", content: user },
-  ], 3800, TEXT_MODELS);
+  ], 6000, TEXT_MODELS);
 
   return { ...specFromObj(extractJson(text), industry), model };
 }

@@ -4,7 +4,7 @@
  * FIXES in this version:
  *  ✅ NEW: extractIdentity() — Groq now validates name, role, email, phone
  *      so location strings (e.g. "Vizianagaram, Andhra Pradesh") never land in `role`
- *  ✅ Model: llama-3.3-70b-versatile
+ *  ✅ Models: see lib/aiModels.js
  *  ✅ Fallback chains for skills / experience / projects
  *  ✅ All Groq failures logged with full detail
  *  ✅ Lazy Groq client
@@ -15,16 +15,14 @@ import fs from "fs";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { callGroqPool, poolAvailable } from "../lib/groqPool.js";
+import { textModels } from "../lib/aiModels.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
 
-// Model chain: strongest first, fast model as a fallback when the 70B is
-// rate-limited/unavailable across every key in the pool.
-const GROQ_MODELS = [
-  { id: "llama-3.3-70b-versatile", label: "llama-3.3-70b", maxOut: 1000 },
-  { id: "llama-3.1-8b-instant",    label: "llama-3.1-8b",  maxOut: 1000 },
-];
+// Model chain from lib/aiModels.js (strongest first). The budget includes the
+// models' short reasoning, so it is larger than the JSON answers themselves.
+const GROQ_MODELS = textModels(2500);
 
 const PYTHON_SCRIPT = path.join(__dirname, "../python/resume_extractor.py");
 // Overridable so deployments can point at the interpreter that actually has
@@ -128,7 +126,7 @@ async function groqCall(systemPrompt, userContent, label) {
         { role: "system", content: systemPrompt },
         { role: "user",   content: input },
       ],
-      1000,
+      2500,
       GROQ_MODELS,
       { temperature: 0, responseFormat: { type: "json_object" } }
     );

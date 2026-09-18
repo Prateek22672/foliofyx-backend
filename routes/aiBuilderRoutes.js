@@ -4,7 +4,7 @@
 import express from "express";
 import rateLimit from "express-rate-limit";
 import { protect } from "../middleware/authMiddleware.js";
-import { generateSection } from "../controllers/aiBuilderController.js";
+import { generateSection, getCatalog } from "../controllers/aiBuilderController.js";
 
 const router = express.Router();
 
@@ -18,5 +18,6 @@ const aiLimiter = rateLimit({
 });
 
 router.post("/generate", protect, aiLimiter, generateSection);
+router.get("/catalog", getCatalog);
 
 export default router;

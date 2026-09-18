@@ -28,7 +28,20 @@ const PortfolioSchema = new mongoose.Schema(
       required: true 
     },
     
-    username: { type: String, unique: true, sparse: true, trim: true, lowercase: true },
+    // Doubles as the <username>.foliofyx.in subdomain label, so it follows the
+    // same rules as CustomWebsite slugs: 3-32 chars of a-z, 0-9 and hyphens.
+    // Mongoose only validates it when the value changes, so legacy usernames load.
+    username: {
+      type: String,
+      unique: true,
+      sparse: true,
+      trim: true,
+      lowercase: true,
+      validate: {
+        validator: (v) => v === undefined || v === null || v === "" || /^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])$/.test(v),
+        message: "Username must be 3-32 characters: letters, numbers and hyphens (not at the start or end).",
+      },
+    },
 
     name: { type: String, required: true },
     template: { type: String, default: "modern" },
@@ -67,6 +80,10 @@ const PortfolioSchema = new mongoose.Schema(
     themeFont: { type: String, default: "#000000" },
     themeFontFamily: { type: String, default: "Switzer, sans-serif" }, 
     accentColor: { type: String, default: "#000000" },
+
+    // Personal touches layered over the theme (heading font and weight, image
+    // corners, page texture). Sanitised in portfolioController.
+    design: { type: mongoose.Schema.Types.Mixed, default: null },
 
     // CUSTOM BUILDER LAYOUT
     // Free-form canvas document for the "custom" template (pages → elements).

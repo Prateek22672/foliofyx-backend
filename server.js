@@ -16,10 +16,10 @@ import aiBuilderRoutes from "./routes/aiBuilderRoutes.js";
 import referenceRoutes from "./routes/referenceRoutes.js";
 import aiChatRoutes from "./routes/aiChatRoutes.js";
 import domainRoutes from "./routes/domainRoutes.js";
-import CustomWebsite from "./models/CustomWebsite.js";
-import Portfolio from "./models/Portfolio.js";
-import { RESERVED_SUBDOMAINS } from "./lib/reservedSubdomains.js";
-import { renderSiteHTML } from "./lib/siteRenderer.js";
+import { hostRouter, siteRoute } from "./lib/siteServing.js";
+import { startDomainMonitor } from "./lib/domainMonitor.js";
+import { requestMonitor, recordError } from "./lib/monitor.js";
+import adminRoutes from "./routes/adminRoutes.js";
 
 
 connectDB();
@@ -29,84 +29,15 @@ const app = express();
 // req.protocol and express-rate-limit see the real client values.
 app.set("trust proxy", 1);
 
+// Latency / error tracking for the admin dashboard (API routes only).
+app.use(requestMonitor());
+
 /* ============================
-   ✅ CUSTOM DOMAIN SERVING
-   Any request whose Host header is a connected, published custom domain
-   gets the SSR-rendered site — this must run before CORS/API routing.
+   ✅ USER SITE SERVING (before CORS / API)
+   <slug>.<ROOT_DOMAIN> and connected custom domains are served here;
+   app and API hosts fall through to the routes below.
 ============================ */
-const APP_HOSTS = new Set([
-  "localhost", "127.0.0.1",
-  "foliofyx.netlify.app", "foliofyx.in", "www.foliofyx.in",
-]);
-
-// Subdomain labels that must never resolve to a user site. The API itself
-// (foliofyx-backend.onrender.com / api.foliofyx.in) is protected by APP_HOSTS
-// and the reserved list; everything else on *.foliofyx.in is a user handle.
-const ROOT_DOMAIN = "foliofyx.in";
-
-const domainCache = new Map(); // host → { site, portfolioId, ts }
-const DOMAIN_TTL = 60_000;
-
-app.use(async (req, res, next) => {
-  try {
-    const rawHost = String(req.hostname || "").toLowerCase();
-    const host = rawHost.replace(/^www\./, "");
-    if (!host || APP_HOSTS.has(rawHost) || APP_HOSTS.has(host)) return next();
-    if (req.path.startsWith("/api") || req.path.startsWith("/uploads")) return next();
-
-    // ── Wildcard subdomains: rahul.foliofyx.in → published site with slug
-    //    "rahul" (SSR), or a legacy portfolio with username "rahul" (redirect).
-    //    Requires the *.foliofyx.in DNS record + wildcard domain on the host.
-    const isSub = host.endsWith(`.${ROOT_DOMAIN}`) && host !== ROOT_DOMAIN;
-    const label = isSub ? host.slice(0, -(ROOT_DOMAIN.length + 1)) : null;
-    if (isSub && (RESERVED_SUBDOMAINS.has(label) || label.includes("."))) return next();
-
-    let hit = domainCache.get(host);
-    if (!hit || Date.now() - hit.ts > DOMAIN_TTL) {
-      let site = null;
-      let portfolioId = null;
-
-      if (isSub) {
-        site = await CustomWebsite.findOne({ slug: label, status: "published" }).lean();
-        if (!site) {
-          const p = await Portfolio.findOne({ username: label }).select("_id").lean();
-          if (p) portfolioId = String(p._id);
-        }
-      } else {
-        // Connected custom domains (yourname.com), as before.
-        site = await CustomWebsite.findOne({
-          "customDomain.name": host,
-          "customDomain.status": { $in: ["verified", "live"] },
-          status: "published",
-        }).lean();
-      }
-
-      hit = { site, portfolioId, ts: Date.now() };
-      domainCache.set(host, hit);
-    }
-
-    // Legacy portfolios render client-side — send the subdomain to the app.
-    if (hit.portfolioId) {
-      return res.redirect(302, `https://${ROOT_DOMAIN}/portfolio/${hit.portfolioId}`);
-    }
-
-    if (!hit.site) {
-      // Unclaimed subdomain: land on the homepage instead of a dead 404.
-      if (isSub) return res.redirect(302, `https://${ROOT_DOMAIN}/`);
-      return next();
-    }
-
-    const html = renderSiteHTML(hit.site, {
-      pageSlug: req.path === "/" ? "/" : req.path.replace(/\/$/, ""),
-      baseUrl: `https://${host}`,
-    });
-    if (!html) return next();
-    return res.status(200).type("html").send(html);
-  } catch (err) {
-    console.error("[domain-serve]", err.message);
-    return next();
-  }
-});
+app.use(hostRouter());
 
 /* ============================
    ✅ CORS CONFIG (FINAL STABLE)
@@ -144,7 +75,7 @@ app.options("*", cors(corsOptions));
 
 //new
 
-app.use("/api/custom-websites", customWebsiteRoutes);
+app.use("/api/custom-websites", express.json({ limit: "10mb" }), customWebsiteRoutes);
 
 
 /* ============================
@@ -175,26 +106,13 @@ app.use("/api/reference", referenceRoutes);
 app.use("/api/ai-chat", aiChatRoutes);
 // Custom domain (DNS) connect + verify.
 app.use("/api/domains", domainRoutes);
+// Admin dashboard (protect + adminOnly inside the router).
+app.use("/api/admin", adminRoutes);
 
 /* ============================
-   ✅ PUBLISHED SITE SSR
-   /site/:slug[/page] serves the published website as real HTML
-   (crawlable, fast, with the interactive runtime baked in).
+   ✅ PUBLISHED SITE SSR: /site/:slug[/page]
 ============================ */
-app.get(["/site/:slug", "/site/:slug/*"], async (req, res) => {
-  try {
-    const site = await CustomWebsite.findOne({ slug: req.params.slug, status: "published" }).lean();
-    if (!site) return res.status(404).type("html").send("<h1>404</h1><p>This site isn't published.</p>");
-    const sub = req.params[0] ? `/${req.params[0].replace(/\/$/, "")}` : "/";
-    const base = (process.env.PUBLIC_SITE_BASE || `${req.protocol}://${req.get("host")}`) + `/site/${site.slug}`;
-    const html = renderSiteHTML(site, { pageSlug: sub, baseUrl: base });
-    if (!html) return res.status(404).type("html").send("<h1>404</h1><p>Page not found.</p>");
-    res.status(200).type("html").send(html);
-  } catch (err) {
-    console.error("[site-ssr]", err.message);
-    res.status(500).type("html").send("<h1>Something went wrong</h1>");
-  }
-});
+app.get(["/site/:slug", "/site/:slug/*"], siteRoute);
 
 // ⚠️ IMPORTANT: keep this LAST
 app.use("/api", resumeParserRoute);
@@ -208,12 +126,22 @@ app.get("/", (req, res) => {
 ============================ */
 app.use((err, req, res, next) => {
   console.error("🔥 Server Error:", err.message);
+  recordError(err, req);
 
-  // Ensure CORS headers even on error
-  res.header("Access-Control-Allow-Origin", req.headers.origin || "*");
-  res.header("Access-Control-Allow-Credentials", "true");
+  // Keep CORS headers on errors, but only for origins we actually allow.
+  const origin = req.headers.origin;
+  if (origin && allowedOrigins.includes(origin)) {
+    res.header("Access-Control-Allow-Origin", origin);
+    res.header("Access-Control-Allow-Credentials", "true");
+    res.header("Vary", "Origin");
+  }
 
   res.status(500).json({ message: "Internal Server Error" });
+});
+
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason?.message || reason);
+  recordError(reason instanceof Error ? reason : new Error(String(reason)));
 });
 
 /* ============================
@@ -222,5 +150,6 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Backend running on port ${PORT}`);
+  startDomainMonitor();
 });
 

@@ -11,6 +11,11 @@ const userSchema = new mongoose.Schema(
     // Verification Flag
     isStudent: { type: Boolean, default: false },
 
+    // Admin dashboard access (also granted via ADMIN_EMAILS).
+    role: { type: String, enum: ["user", "admin"], default: "user" },
+    // Updated at most every few minutes by the auth middleware.
+    lastActiveAt: { type: Date, index: true },
+
     // Plan Field
     plan: { 
       type: String, 
