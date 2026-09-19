@@ -36,8 +36,14 @@ export const protect = async (req, res, next) => {
   }
 };
 
+// The owner's account is always an admin. ADMIN_EMAILS (comma separated) adds more.
+const OWNER_ADMIN_EMAILS = ["prateek.koratala@gmail.com"];
+
 const adminEmails = () =>
-  new Set(String(process.env.ADMIN_EMAILS || "").split(/[\s,;]+/).map((e) => e.trim().toLowerCase()).filter(Boolean));
+  new Set([
+    ...OWNER_ADMIN_EMAILS,
+    ...String(process.env.ADMIN_EMAILS || "").split(/[\s,;]+/).map((e) => e.trim().toLowerCase()).filter(Boolean),
+  ]);
 
 export const isAdminUser = (user) => Boolean(user) && (user.role === "admin" || adminEmails().has(String(user.email || "").toLowerCase()));
 
