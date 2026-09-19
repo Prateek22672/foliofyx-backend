@@ -1,6 +1,7 @@
 // server/routes/customWebsiteRoutes.js
 
 import express from "express";
+import rateLimit from "express-rate-limit";
 import { protect } from "../middleware/authMiddleware.js"; // your existing JWT middleware
 import {
   createWebsite,
@@ -14,9 +15,13 @@ import {
   logAiGeneration,
   getPublishedWebsite,
   checkSlugAvailability,
+  previewWebsite,
 } from "../controllers/customWebsiteController.js";
 
 const router = express.Router();
+
+// The Studio's mobile preview re-renders on (debounced) edits.
+const previewLimiter = rateLimit({ windowMs: 60_000, max: 90, standardHeaders: true, legacyHeaders: false, message: { message: "Previewing too fast; wait a moment." } });
 
 // ── Public routes (no auth) ──────────────────────────────────────────────────
 router.get("/public/:slug", getPublishedWebsite);
@@ -25,6 +30,7 @@ router.get("/slug-available/:slug", checkSlugAvailability);
 // ── Protected routes (JWT required) ─────────────────────────────────────────
 router.use(protect);
 
+router.post("/preview", previewLimiter, previewWebsite); // POST render an unsaved draft (no storage)
 router.get("/",              getUserWebsites);   // GET all for current user
 router.post("/",             createWebsite);     // POST create new
 router.get("/:id",           getWebsite);        // GET one by id

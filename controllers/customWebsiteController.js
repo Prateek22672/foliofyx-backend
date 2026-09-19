@@ -13,6 +13,7 @@ import {
 import { siteUrls } from "../lib/siteConfig.js";
 import { invalidateSite } from "../lib/hostCache.js";
 import { domainPayload, releaseDomain } from "../lib/domainService.js";
+import { renderSiteHTML } from "../lib/siteRenderer.js";
 
 const fail = (res, status, message, code) => res.status(status).json({ success: false, message, ...(code ? { code } : {}) });
 
@@ -166,6 +167,41 @@ export async function saveWebsite(req, res) {
 }
 
 // ── SLUG AVAILABILITY (public) ────────────────────────────────────────────────
+// ── POST /api/custom-websites/preview ────────────────────────────────────────
+// Renders an UNSAVED draft with the same renderer that serves published sites,
+// so the Studio's phone frame shows exactly what visitors get on a phone.
+// Nothing is stored. Links and forms are disabled inside the preview.
+const PREVIEW_GUARD =
+  "<script>document.addEventListener(\"click\",function(e){var a=e.target&&e.target.closest&&e.target.closest(\"a\");" +
+  "if(a){var h=a.getAttribute(\"href\")||\"\";if(h.charAt(0)!==\"#\")e.preventDefault()}},true);" +
+  "document.addEventListener(\"submit\",function(e){e.preventDefault()},true)</script>";
+
+export async function previewWebsite(req, res) {
+  try {
+    const { pages, activePage, title, settings } = req.body || {};
+    const clean = sanitizePages(pages);
+    if (!clean || !clean.length) {
+      return res.status(400).json({ success: false, message: "Add at least one page to preview." });
+    }
+    const site = {
+      title: sanitizeTitle(title),
+      slug: "preview",
+      industry: "general",
+      status: "draft",
+      settings: sanitizeSettings(settings),
+      pages: clean,
+    };
+    const page = clean.find((p) => p.id === activePage) || clean[0];
+    const html = renderSiteHTML(site, { pageSlug: page.slug, baseUrl: "", badge: false });
+    if (!html) return res.status(400).json({ success: false, message: "That page can't be previewed." });
+    const guarded = html.includes("</body>") ? html.replace("</body>", `${PREVIEW_GUARD}</body>`) : html + PREVIEW_GUARD;
+    res.json({ success: true, html: guarded });
+  } catch (err) {
+    console.error("[custom-websites] preview:", err);
+    res.status(500).json({ success: false, message: "Couldn't build the preview right now." });
+  }
+}
+
 export async function checkSlugAvailability(req, res) {
   try {
     const slug = normalizeSlug(req.params.slug);
