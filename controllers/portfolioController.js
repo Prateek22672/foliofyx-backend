@@ -57,7 +57,10 @@ export const savePortfolio = async (req, res) => {
     const userId = user._id;
 
     const targetId = req.params.id || req.body._id; 
-    const { _id, ...data } = req.body;
+    // customDomain is server-owned (DNS state, verification token, Render
+    // status) — only server/controllers/domainController.js may write it.
+    // eslint-disable-next-line no-unused-vars
+    const { _id, customDomain: _ignoredCustomDomain, ...data } = req.body;
 
     // --- PARSE ARRAYS ---
     let skillsData = data.skills;

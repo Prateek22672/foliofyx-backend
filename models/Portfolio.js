@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { CustomDomainSchema } from "./customDomainSchema.js";
 
 const ExperienceSchema = new mongoose.Schema({
   company: { type: String, default: "General" },
@@ -85,6 +86,10 @@ const PortfolioSchema = new mongoose.Schema(
     // corners, page texture). Sanitised in portfolioController.
     design: { type: mongoose.Schema.Types.Mixed, default: null },
 
+    // Bring-your-own custom domain — same shape and lifecycle as
+    // CustomWebsite's (server/lib/domainService.js works on either model).
+    customDomain: { type: CustomDomainSchema, default: undefined },
+
     // CUSTOM BUILDER LAYOUT
     // Free-form canvas document for the "custom" template (pages → elements).
     // Mixed type so the whole builder document persists without a rigid schema.
@@ -95,5 +100,12 @@ const PortfolioSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+// One site per domain, across all Portfolio docs; sparse so sites without a
+// domain don't collide on null. (Cross-model uniqueness with CustomWebsite is
+// additionally enforced in the domain controller.)
+PortfolioSchema.index({ "customDomain.name": 1 }, { unique: true, sparse: true });
+// Domain monitor scans.
+PortfolioSchema.index({ "customDomain.status": 1, "customDomain.nextCheckAt": 1 });
 
 export default mongoose.model("Portfolio", PortfolioSchema);

@@ -4,17 +4,36 @@
 
 import mongoose from "mongoose";
 import CustomWebsite from "../models/CustomWebsite.js";
+import Portfolio from "../models/Portfolio.js";
 import {
   normalizeCustomDomain, newToken, requiredRecords, runDomainCheck, domainPayload, releaseDomain,
 } from "../lib/domainService.js";
 import { invalidateSite } from "../lib/hostCache.js";
 
+// A "site" here is either a Custom Builder site or a regular template
+// portfolio — both carry a `customDomain` sub-document of the same shape
+// (models/customDomainSchema.js), so lib/domainService.js works on either
+// unmodified. We just need the right Mongoose doc for a given id.
 async function getOwnedSite(siteId, userId) {
   if (!mongoose.Types.ObjectId.isValid(siteId)) return null;
-  return CustomWebsite.findOne({ _id: siteId, userId });
+  const site = await CustomWebsite.findOne({ _id: siteId, userId });
+  if (site) return site;
+  return Portfolio.findOne({ _id: siteId, userId });
+}
+
+/** Is `domain` already connected to a different site, of either type? */
+async function domainTakenElsewhere(domain, excludeId) {
+  const [byCustom, byPortfolio] = await Promise.all([
+    CustomWebsite.exists({ "customDomain.name": domain, _id: { $ne: excludeId } }),
+    Portfolio.exists({ "customDomain.name": domain, _id: { $ne: excludeId } }),
+  ]);
+  return Boolean(byCustom || byPortfolio);
 }
 
 const fail = (res, status, message, code) => res.status(status).json({ success: false, message, ...(code ? { code } : {}) });
+
+// CustomWebsite gates visibility with `status`, Portfolio with `isPublic`.
+const isSiteLive = (site) => site.status === "published" || site.isPublic === true;
 
 function messageFor(p) {
   switch (p.status) {
@@ -35,8 +54,9 @@ export async function connectDomain(req, res) {
     const { domain, isApex, error } = normalizeCustomDomain(req.body?.domain);
     if (error) return fail(res, 400, error, "INVALID_DOMAIN");
 
-    const taken = await CustomWebsite.exists({ "customDomain.name": domain, _id: { $ne: site._id } });
-    if (taken) return fail(res, 409, "That domain is already connected to another FolioFYX site.", "DOMAIN_TAKEN");
+    if (await domainTakenElsewhere(domain, site._id)) {
+      return fail(res, 409, "That domain is already connected to another FolioFYX site.", "DOMAIN_TAKEN");
+    }
 
     const previous = site.customDomain?.name;
     const sameDomain = previous === domain;
@@ -90,7 +110,7 @@ export async function verifyDomain(req, res) {
       success: true,
       ...payload,
       message: messageFor(payload),
-      ...(site.status !== "published" && payload.status === "live"
+      ...(!isSiteLive(site) && payload.status === "live"
         ? { notice: "Your domain is connected. Publish the site so visitors see it." }
         : {}),
     });

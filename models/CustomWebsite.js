@@ -5,6 +5,7 @@
 import mongoose from "mongoose";
 import { isReservedSubdomain } from "../lib/reservedSubdomains.js";
 import { numberSetter, normalizeBgType, toNumber } from "../lib/sanitizeSite.js";
+import { CustomDomainSchema, DOMAIN_STATUSES as SHARED_DOMAIN_STATUSES } from "./customDomainSchema.js";
 
 // Numeric style/geometry fields accept "48px"-style strings from editors and
 // AI output — the setter coerces before Mongoose casts, so no CastError.
@@ -124,21 +125,9 @@ const PageSchema = new mongoose.Schema({
   pageTransition:  { type: String, default: "none" },
 }, { _id: false });
 
-// ── Custom domain DNS record snapshot (what the user must create + last check)
-const DomainRecordSchema = new mongoose.Schema({
-  type:     { type: String },            // TXT | A | CNAME
-  host:     { type: String },            // relative to the zone: "@", "www", "_foliofyx.shop"
-  name:     { type: String },            // fully qualified name
-  value:    { type: String },
-  purpose:  { type: String },
-  required: { type: Boolean, default: true },
-  ok:       { type: Boolean, default: null },
-  found:    { type: [String], default: undefined },
-  problem:  { type: String },
-}, { _id: false });
-
-// Old statuses (pending | verified) still load; new flow uses the rest.
-export const DOMAIN_STATUSES = ["pending", "verified", "pending_dns", "verifying", "live", "dns_missing", "failed"];
+// Custom-domain sub-schema now lives in ./customDomainSchema.js, shared with
+// Portfolio — kept re-exported here in case anything still imports it hence.
+export const DOMAIN_STATUSES = SHARED_DOMAIN_STATUSES;
 
 // ── Main CustomWebsite schema ────────────────────────────────────────────────
 const CustomWebsiteSchema = new mongoose.Schema({
@@ -193,21 +182,7 @@ const CustomWebsiteSchema = new mongoose.Schema({
 
   // Custom domain (DNS) connection
   customDomain: {
-    name:              { type: String, lowercase: true, trim: true }, // e.g. "mystudio.com"
-    status:            { type: String, enum: DOMAIN_STATUSES, default: undefined },
-    verificationToken: { type: String },
-    connectedAt:       { type: Date },
-    verifiedAt:        { type: Date },   // DNS first seen correct
-    liveAt:            { type: Date },
-    lastCheckedAt:     { type: Date },
-    nextCheckAt:       { type: Date },
-    dnsMissingSince:   { type: Date },
-    checkCount:        { type: Number, default: undefined },
-    lastError:         { type: String },
-    warnings:          { type: [String], default: undefined },
-    records:           { type: [DomainRecordSchema], default: undefined },
-    renderStatus:      { type: String }, // Render verificationStatus
-    renderDomainId:    { type: String },
+    ...CustomDomainSchema,
   },
 
   // Thumbnail (auto-generated screenshot URL or manual)
