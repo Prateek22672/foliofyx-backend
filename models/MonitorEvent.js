@@ -6,7 +6,7 @@ import mongoose from "mongoose";
 
 const MonitorEventSchema = new mongoose.Schema(
   {
-    type: { type: String, enum: ["error", "slow", "ai", "builder", "domain", "auth"], required: true, index: true },
+    type: { type: String, enum: ["error", "slow", "ai", "builder", "domain", "auth", "resume_parse"], required: true, index: true },
     at: { type: Date, default: Date.now },
     ok: { type: Boolean, default: true },
     route: { type: String },

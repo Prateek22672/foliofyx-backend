@@ -225,3 +225,52 @@ export function system(req, res) {
     catalog: catalog.counts,
   });
 }
+
+// ── GET /api/admin/pipelines ───────────────────────────────────────────────────
+// Health for "extra processing" features — multi-step pipelines beyond a
+// single AI call (today: resume parsing — file upload → Python extraction →
+// several Groq calls). One MonitorEvent per attempt (lib/monitor.js /
+// controllers/resumeParserController.js), so a reported "it doesn't work" has
+// an actual reason attached instead of nothing to go on.
+export async function pipelines(req, res) {
+  try {
+    const since = new Date(Date.now() - DAY);
+    const [recent, dayStats] = await Promise.all([
+      MonitorEvent.find({ type: "resume_parse" }).sort({ at: -1 }).limit(80).populate("userId", "email").lean(),
+      MonitorEvent.aggregate([
+        { $match: { type: "resume_parse", at: { $gte: since } } },
+        { $group: { _id: "$ok", n: { $sum: 1 }, avgMs: { $avg: "$ms" } } },
+      ]),
+    ]);
+    const okDay = dayStats.find((d) => d._id === true)?.n || 0;
+    const failDay = dayStats.find((d) => d._id === false)?.n || 0;
+    const attemptsDay = okDay + failDay;
+    const avgMsDay = attemptsDay
+      ? Math.round(dayStats.reduce((sum, d) => sum + (d.avgMs || 0) * (d.n || 0), 0) / attemptsDay)
+      : 0;
+
+    res.json({
+      resumeParser: {
+        status: "beta",
+        last24h: {
+          attempts: attemptsDay,
+          ok: okDay,
+          failed: failDay,
+          successRate: attemptsDay ? Math.round((okDay / attemptsDay) * 1000) / 10 : null,
+          avgMs: avgMsDay,
+        },
+        recent: recent.map((e) => ({
+          at: e.at,
+          ok: e.ok,
+          ms: e.ms,
+          stage: e.feature,
+          message: e.message,
+          user: e.userId?.email || null,
+          file: e.meta?.file || null,
+        })),
+      },
+    });
+  } catch (err) {
+    fail(res, err, "pipelines");
+  }
+}

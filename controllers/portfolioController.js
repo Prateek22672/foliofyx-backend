@@ -6,10 +6,16 @@ import jwt from "jsonwebtoken";
 import path from "path";
 import fs from "fs";
 
+const authError = (message) => {
+  const err = new Error(message);
+  err.status = 401;
+  return err;
+};
+
 const verifyUser = async (req) => {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) {
-    throw new Error("Unauthorized: No token provided");
+    throw authError("Please log in to save your work.");
   }
 
   const token = authHeader.split(" ")[1];
@@ -17,10 +23,15 @@ const verifyUser = async (req) => {
     throw new Error("Server Error: JWT_SECRET is not defined");
   }
 
-  const decoded = jwt.verify(token, process.env.JWT_SECRET);
+  let decoded;
+  try {
+    decoded = jwt.verify(token, process.env.JWT_SECRET);
+  } catch {
+    throw authError("Your session has expired. Please log in again.");
+  }
   const user = await User.findById(decoded.id).select("-password");
 
-  if (!user) throw new Error("User not found");
+  if (!user) throw authError("User not found");
   return user;
 };
 
@@ -176,6 +187,9 @@ export const savePortfolio = async (req, res) => {
 
   } catch (err) {
     console.error("❌ Save Portfolio Error:", err.message);
+    if (err.status === 401) {
+      return res.status(401).json({ message: err.message });
+    }
     if (err.code === 11000 && err.keyPattern && err.keyPattern.username) {
         return res.status(400).json({ message: "Username already taken. Please choose another." });
     }

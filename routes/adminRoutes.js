@@ -2,7 +2,7 @@
 import express from "express";
 import rateLimit from "express-rate-limit";
 import { protect, adminOnly } from "../middleware/authMiddleware.js";
-import { adminMe, overview, users, sites, ai, probeModels, errors, system } from "../controllers/adminController.js";
+import { adminMe, overview, users, sites, ai, probeModels, errors, system, pipelines } from "../controllers/adminController.js";
 
 const router = express.Router();
 
@@ -17,5 +17,6 @@ router.get("/ai", ai);
 router.post("/ai/probe", probeLimiter, probeModels);
 router.get("/errors", errors);
 router.get("/system", system);
+router.get("/pipelines", pipelines);
 
 export default router;

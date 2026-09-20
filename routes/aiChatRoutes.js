@@ -1,9 +1,13 @@
 // server/routes/aiChatRoutes.js
-// AI Chat Builder routes — protected + rate-limited to guard the Groq quota.
+// AI Chat Builder routes — rate-limited to guard the Groq quota. Open to
+// guests ("work first, log in to save/publish" — see AIBuilder/index.jsx):
+// the per-IP rate limit was always the actual abuse control here (it isn't
+// keyed by account), so dropping the login requirement adds no new cost
+// exposure, only removes a top-of-funnel friction gate.
 
 import express from "express";
 import rateLimit from "express-rate-limit";
-import { protect } from "../middleware/authMiddleware.js";
+import { optionalAuth } from "../middleware/authMiddleware.js";
 import { chatMessage } from "../controllers/aiChatController.js";
 
 const router = express.Router();
@@ -17,6 +21,6 @@ const chatLimiter = rateLimit({
   message: { message: "Too many AI requests. Please slow down and try again shortly." },
 });
 
-router.post("/message", protect, chatLimiter, chatMessage);
+router.post("/message", optionalAuth, chatLimiter, chatMessage);
 
 export default router;

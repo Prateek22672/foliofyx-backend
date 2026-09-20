@@ -16,6 +16,7 @@ import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { callGroqPool, poolAvailable } from "../lib/groqPool.js";
 import { textModels } from "../lib/aiModels.js";
+import { recordEvent } from "../lib/monitor.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname  = path.dirname(__filename);
@@ -516,12 +517,32 @@ function buildFinalSchema(identity, bio, education, skills, experience, projects
   };
 }
 
+// ── Admin observability (health/logs/failures — see lib/monitor.js) ───────────
+// One event per attempt, whatever the outcome, so the admin dashboard can show
+// this feature's real success rate and the exact reason behind every failure
+// — not just "it doesn't work" reports with nothing to go on.
+function logAttempt(req, t0, ok, stage, message, extra) {
+  recordEvent("resume_parse", {
+    ok,
+    ms: Date.now() - t0,
+    userId: req.user?._id,
+    feature: stage,
+    message: String(message || "").slice(0, 500),
+    meta: {
+      file: req.file ? { name: req.file.originalname, size: req.file.size, type: req.file.mimetype } : null,
+      ...extra,
+    },
+  });
+}
+
 // ── MAIN CONTROLLER ───────────────────────────────────────────────────────────
 export const parseResume = async (req, res) => {
   const tempPath = req.file?.path;
+  const t0 = Date.now();
 
   try {
     if (!req.file) {
+      logAttempt(req, t0, false, "no_file", "No file uploaded.");
       return res.status(400).json({ error: "No file uploaded." });
     }
 
@@ -538,10 +559,12 @@ export const parseResume = async (req, res) => {
       console.log(`[ResumeParser] raw_projects length: ${raw.raw_projects?.length || 0}`);
     } catch (pyErr) {
       console.error("[ResumeParser] Python error:", pyErr.message);
+      logAttempt(req, t0, false, "extraction", pyErr.message);
       return res.status(500).json({ error: "PDF extraction failed: " + pyErr.message });
     }
 
     if (raw.error) {
+      logAttempt(req, t0, false, "extraction", raw.error);
       return res.status(422).json({ error: raw.error });
     }
 
@@ -605,10 +628,12 @@ export const parseResume = async (req, res) => {
       github:   raw.github,
     });
 
+    logAttempt(req, t0, true, "success", `${finalData.name || "unnamed"} — ${finalData.skills.length} skills, ${finalData.experience.length} roles, ${finalData.projects.length} projects`);
     return res.status(200).json({ success: true, data: finalData });
 
   } catch (err) {
     console.error("[ResumeParser] Unexpected error:", err);
+    logAttempt(req, t0, false, "unexpected", err.message);
     return res.status(500).json({ error: "Internal error: " + err.message });
   } finally {
     if (tempPath) {

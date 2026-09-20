@@ -5,14 +5,17 @@ import multer from "multer";
 import os from "os";
 import rateLimit from "express-rate-limit";
 import { parseResume } from "../controllers/resumeParserController.js";
-import { protect } from "../middleware/authMiddleware.js";
+import { optionalAuth } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-// Resume parsing spawns Python + several LLM calls — keep it per-user and throttled.
+// Resume parsing spawns Python + several LLM calls, so it's the priciest
+// anonymous-facing endpoint — throttled harder per IP than the chat builder
+// (10/min for a signed-in caller, but guests ("work first, log in to save" —
+// see create/index.jsx) get a stricter 3/min).
 const parseLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 10,
+  max: (req) => (req.user ? 10 : 3),
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many resume uploads — try again in a minute." },
@@ -39,7 +42,7 @@ const upload = multer({
 });
 
 // 🔥 Add try-catch wrapper (important)
-router.post("/parse-resume", protect, parseLimiter, upload.single("resume"), async (req, res) => {
+router.post("/parse-resume", optionalAuth, parseLimiter, upload.single("resume"), async (req, res) => {
   try {
     await parseResume(req, res);
   } catch (err) {
